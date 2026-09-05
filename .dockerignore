@@ -1,4 +1,4 @@
-# Build context is only requirements.txt + app.py (see Dockerfile COPY).
+# Build context is requirements.txt + download_model.py + app.py (see Dockerfile COPY).
 # Keep the upload small and avoid checksum noise from local artifacts.
 .git
 .gitignore
@@ -13,7 +13,6 @@ models
 *.onnx
 *.onnx_data
 client_example.py
-download_model.py
 compose.yaml
 *.md
 *.example

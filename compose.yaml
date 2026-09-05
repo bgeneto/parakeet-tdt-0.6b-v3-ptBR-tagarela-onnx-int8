@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        USE_QUANTIZATION: "${USE_QUANTIZATION:-true}"
     # Local tag only — this name is not on Docker Hub. Never pull.
     image: parakeet-stt-ptbr:1.0.0
     pull_policy: build
@@ -14,16 +16,19 @@ services:
       - path: .env
         required: false
     environment:
-      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-0}"
+      # Host GPU is selected only via deploy.device_ids (interpolated from .env
+      # GPU_ID). Inside the container that GPU is always CUDA device 0, so do
+      # not forward the host index as NVIDIA_VISIBLE_DEVICES / GPU_ID.
+      NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
       CUDA_MODULE_LOADING: "${CUDA_MODULE_LOADING:-LAZY}"
       API_KEY: "${API_KEY:-}"
       MODEL_DIR: "${MODEL_DIR:-/opt/models/parakeet}"
       MODEL_ARCH: "${MODEL_ARCH:-nemo-conformer-tdt}"
-      QUANTIZATION: "${QUANTIZATION:-int8}"
+      USE_QUANTIZATION: "${USE_QUANTIZATION:-true}"
       LANGUAGE: "${LANGUAGE:-pt-BR}"
-      MODEL_ID: "${MODEL_ID:-parakeet-tdt-0.6b-v3-ptBR}"
-      GPU_ID: "${GPU_ID:-0}"
+      MODEL_ID: "${MODEL_ID:-}"
+      GPU_ID: "0"
       GPU_MEM_LIMIT_GB: "${GPU_MEM_LIMIT_GB:-6}"
       CUDNN_CONV_ALGO_SEARCH: "${CUDNN_CONV_ALGO_SEARCH:-HEURISTIC}"
       CUDNN_CONV_MAX_WORKSPACE: "${CUDNN_CONV_MAX_WORKSPACE:-1}"

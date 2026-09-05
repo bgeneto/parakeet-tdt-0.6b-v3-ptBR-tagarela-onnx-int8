@@ -1,6 +1,6 @@
 # Parakeet TDT 0.6B v3 pt-BR (ONNX INT8) — TAGARELA
 
-Servidor de Speech-to-Text (STT) de alta performance e produção para **Português Brasileiro (pt-BR)** baseado no modelo **NVIDIA Parakeet TDT 0.6B v3**, quantizado em **ONNX INT8** pela iniciativa [TAGARELA](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8).
+Servidor de Speech-to-Text (STT) de alta performance e produção para **Português Brasileiro (pt-BR)** baseado no modelo **NVIDIA Parakeet TDT 0.6B v3** (fine-tune TAGARELA). Por padrão usa a quantização **ONNX INT8** ([calneymgp](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8)); `USE_QUANTIZATION=false` baixa o ONNX de precisão total ([alefiury](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx)).
 
 ---
 
@@ -10,7 +10,7 @@ Servidor de Speech-to-Text (STT) de alta performance e produção para **Portugu
 - **Pegada de VRAM Reduzida**: INT8 + `gpu_mem_limit` de 4 GB enquanto o modelo está carregado. Após `SLEEP_IDLE_SECONDS` sem requests, as sessões ORT são destruídas e a GPU sofre `cudaDeviceReset`, devolvendo a VRAM ao driver (mesmo padrão do `llama-server --sleep-idle-seconds`).
 - **Streaming VAD (Voice Activity Detection)**: Decodificação contínua via `ffmpeg` fatiada dinamicamente por energia acústica. Processa áudios de qualquer formato e de **duração ilimitada sem estourar RAM ou VRAM**.
 - **Compatível com OpenAI API**: Endpoint compatível com `/v1/audio/transcriptions`, permitindo integração direta com bibliotecas existentes e com o SDK oficial da OpenAI.
-- **Air-Gap / Self-Contained**: O modelo ONNX INT8 é baixado e congelado dentro da imagem Docker na etapa de build, garantindo inicialização confiável e sem dependência externa em runtime.
+- **Air-Gap / Self-Contained**: O modelo ONNX escolhido (`USE_QUANTIZATION`) é baixado e congelado dentro da imagem Docker na etapa de build, garantindo inicialização confiável e sem dependência externa em runtime.
 
 ---
 
@@ -73,10 +73,12 @@ parakeet-tdt-0.6b-v3-ptBR-tagarela-onnx-int8/
 ```bash
 cp .env.example .env
 # Defina API_KEY em .env antes de expor a porta publicamente.
+# USE_QUANTIZATION=true  → INT8 (~0.9 GB)
+# USE_QUANTIZATION=false → FP32 alefiury (~2.5 GB); exige rebuild
 docker compose up -d --build
 ```
 
-O download do modelo (~1.4 GB) ocorre durante o build da imagem Docker.
+O download do modelo ocorre durante o build da imagem Docker.
 
 ### 2. Verificar Prontidão
 
@@ -211,10 +213,10 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | :--- | :--- | :--- |
 | `MODEL_DIR` | `/opt/models/parakeet` | Diretório onde os artefatos do modelo ONNX residem. |
 | `MODEL_ARCH` | `nemo-conformer-tdt` | Tipo ONNX-ASR deste checkpoint (`config.json`). |
-| `QUANTIZATION` | `int8` | Pesos INT8 (`encoder-model.int8.onnx`). |
+| `USE_QUANTIZATION` | `true` | `true` = INT8 (`calneymgp/...-onnx-int8`). `false` = FP32 (`alefiury/...-TAGARELA-onnx`). Rebuild após mudar: `docker compose up -d --build`. |
+| `MODEL_ID` | *(derivado)* | Nome do modelo na API. Vazio = ID do repositório Hugging Face escolhido. |
 | `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
-| `NVIDIA_VISIBLE_DEVICES` | `0` | GPU do host visível no contêiner (Compose). |
-| `GPU_ID` | `0` | Índice do dispositivo CUDA utilizado pelo ORT (dentro do contêiner). |
+| `GPU_ID` | `0` | Índice da GPU no host (`nvidia-smi`). O Compose faz o pin via `device_ids`; no contêiner o ORT sempre usa o dispositivo CUDA `0`. Um único ID — `0,1` não vira lista YAML. |
 | `GPU_MEM_LIMIT_GB` | `6` | Teto de VRAM do arena CUDA enquanto o modelo está carregado (GB). |
 | `MAX_CHUNK_S` | `30` | Janela do encoder (s). 30 s ocupa melhor a 3090 que 20 s; o decoder TDT continua O(T). |
 | `CHUNK_OVERLAP_S` | `1.0` | Sobreposição só para corte duro (silêncio não precisa de 2 s). |
@@ -269,12 +271,17 @@ Caso prefira rodar diretamente no host Linux com ambiente virtual Python:
 
 3. **Baixe o modelo**:
    ```bash
+   # INT8 (padrão, USE_QUANTIZATION=true)
    python3 download_model.py --dest ./models/parakeet
+
+   # FP32 (alefiury)
+   USE_QUANTIZATION=false python3 download_model.py --dest ./models/parakeet
    ```
 
 4. **Inicie o servidor**:
    ```bash
    export MODEL_DIR="./models/parakeet"
+   # USE_QUANTIZATION=false se o download foi FP32
    uvicorn app:app --host 0.0.0.0 --port 8080
    ```
 
@@ -283,5 +290,6 @@ Caso prefira rodar diretamente no host Linux com ambiente virtual Python:
 ## Créditos e Reconhecimentos
 
 - Modelo desenvolvido e treinado pela [NVIDIA NeMo (Parakeet TDT 0.6B)](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
-- Fine-tuning e quantização INT8 para Português Brasileiro pelo projeto [TAGARELA / Calney G. P. Silva](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8).
+- Fine-tune pt-BR TAGARELA e export ONNX: [alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx).
+- Quantização INT8: [TAGARELA / Calney G. P. Silva](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8).
 - Motor de inferência leve por [onnx-asr](https://github.com/thewh1teagle/onnx-asr) e [ONNX Runtime](https://onnxruntime.ai/).

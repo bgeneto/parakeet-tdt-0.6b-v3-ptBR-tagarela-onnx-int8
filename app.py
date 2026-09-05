@@ -24,14 +24,18 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from download_model import resolve_variant, use_quantization_enabled
+
 LOG = logging.getLogger("stt")
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/opt/models/parakeet")
 # Generic TDT type matches this repo's config.json (not the NVIDIA Hub id).
 MODEL_ARCH = os.environ.get("MODEL_ARCH", "nemo-conformer-tdt")
-QUANTIZATION = os.environ.get("QUANTIZATION", "int8")
+USE_QUANTIZATION = use_quantization_enabled()
+_MODEL = resolve_variant(USE_QUANTIZATION)
+QUANTIZATION = _MODEL.quantization
 LANGUAGE = os.environ.get("LANGUAGE", "pt-BR")
-MODEL_ID = os.environ.get("MODEL_ID", "parakeet-tdt-0.6b-v3-ptBR")
+MODEL_ID = os.environ.get("MODEL_ID", "").strip() or _MODEL.model_id
 SR = 16000
 # Long-form TDT: 30s windows saturate the encoder better than 20s.
 # TDT decode is still O(T); fewer windows = less overlap/kernel-launch tax.
@@ -202,7 +206,14 @@ class AsrEngine:
             (p[0] if isinstance(p, tuple) else p) == "CUDAExecutionProvider" for p in providers
         )
         cpu_ep = ["CPUExecutionProvider"]
-        quant = QUANTIZATION.strip() or None
+        encoder = Path(MODEL_DIR) / _MODEL.encoder_file
+        if not encoder.is_file():
+            raise FileNotFoundError(
+                f"Missing {encoder} (USE_QUANTIZATION={str(USE_QUANTIZATION).lower()}). "
+                f"Expected {_MODEL.repo_id}. Rebuild with docker compose up -d --build "
+                "or run download_model.py with the same USE_QUANTIZATION."
+            )
+        quant = QUANTIZATION
         pre_on_gpu = PREPROCESS_ON_GPU and self._using_cuda
         pre_cfg = {
             "providers": providers if pre_on_gpu else cpu_ep,
@@ -231,7 +242,7 @@ class AsrEngine:
             MAX_CHUNK_S,
             CHUNK_OVERLAP_S,
             "cuda-conv" if pre_on_gpu else "cpu-numpy",
-            quant,
+            _MODEL.key,
             extra,
         )
 

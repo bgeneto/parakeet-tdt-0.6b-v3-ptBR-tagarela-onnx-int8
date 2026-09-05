@@ -1,6 +1,23 @@
 # syntax=docker/dockerfile:1
 # Layer order: rare → frequent. pip only rebuilds when requirements.txt changes.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+#
+# Final image is nvidia/cuda:*-base (cudart only). cuBLAS / cuFFT / cuRAND / NVRTC /
+# cuDNN are copied from the cudnn-runtime image. NPP, NCCL, cuSOLVER, cuSPARSE,
+# nvJPEG and cuFile are omitted — libonnxruntime_providers_cuda.so does not link them.
+
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS cuda-libs
+RUN mkdir -p /opt/cuda-slim/lib64 /opt/cuda-slim/cudnn \
+    && cp -a /usr/local/cuda/lib64/libcublas.so.12* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libcublasLt.so.12* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libcufft.so.11* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libcurand.so.10* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libnvrtc.so.12* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libnvrtc-builtins.so* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libnvJitLink.so.12* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/local/cuda/lib64/libnvfatbin.so.12* /opt/cuda-slim/lib64/ \
+    && cp -a /usr/lib/x86_64-linux-gnu/libcudnn*.so.9* /opt/cuda-slim/cudnn/
+
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
 # Build/runtime invariants only. Tunables (SLEEP_IDLE_SECONDS, GPU_MEM_LIMIT_…)
 # live at the bottom so editing them does not invalidate apt/pip/model layers.
@@ -14,12 +31,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
+COPY --from=cuda-libs /opt/cuda-slim/lib64/ /usr/local/cuda/lib64/
+COPY --from=cuda-libs /opt/cuda-slim/cudnn/ /usr/lib/x86_64-linux-gnu/
+RUN ldconfig
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip \
-        ffmpeg ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
+        ffmpeg ca-certificates \
     && python3 -m venv /opt/venv \
-    && pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && apt-get purge -y python3-pip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 1000 --create-home stt \
     && mkdir -p /app /opt/models /tmp/stt \
     && chown stt:stt /app /tmp/stt
@@ -31,15 +54,26 @@ COPY requirements.txt .
 # Cache mount: image stays cache-free; rebuilds of *this* layer reuse wheels.
 # Quote the GPU spec: unquoted > / < are shell redirects.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt \
+    pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y onnxruntime || true \
-    && pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.22.0,<1.27.0" \
+    && pip install --no-cache-dir --force-reinstall --no-deps "onnxruntime-gpu>=1.22.0,<1.27.0" \
     && python -c "\
-import onnxruntime as o;\
-getattr(o, 'preload_dlls', lambda **k: None)();\
-p = o.get_available_providers();\
-print(p);\
-assert 'CUDAExecutionProvider' in p, p" \
+import glob, os, subprocess, sys
+import onnxruntime as o
+getattr(o, 'preload_dlls', lambda **k: None)()
+p = o.get_available_providers()
+print(p)
+assert 'CUDAExecutionProvider' in p, p
+sos = glob.glob('/opt/venv/lib/python3.*/site-packages/onnxruntime/capi/libonnxruntime_providers_cuda.so')
+assert sos, 'cuda EP .so missing'
+out = subprocess.check_output(['ldd', sos[0]], text=True)
+missing = [ln for ln in out.splitlines() if 'not found' in ln]
+if missing:
+    sys.stderr.write('\n'.join(missing) + '\n')
+    raise SystemExit('CUDA EP has unresolved libraries')
+" \
+    && find /opt/venv -depth -type d -name '__pycache__' -exec rm -rf {} + \
+    && find /opt/venv -type f \( -name '*.pyi' -o -name '*.pyc' \) -delete \
     && chown -R stt:stt /opt/venv
 
 # --- Model: independent of app.py; Hub blob cache is a mount, not an image layer ---
