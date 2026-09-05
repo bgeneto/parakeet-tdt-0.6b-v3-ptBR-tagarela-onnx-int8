@@ -17,6 +17,7 @@ def transcribe_via_urllib(
     file_path: Path,
     response_format: str = "verbose_json",
     language: str | None = None,
+    api_key: str | None = None,
 ) -> str:
     """Send multipart form upload using Python standard library without external dependencies."""
     boundary = f"----WebKitFormBoundary{os.urandom(16).hex()}"
@@ -54,13 +55,17 @@ def transcribe_via_urllib(
 
     body.extend(f"--{boundary}--\r\n".encode("utf-8"))
 
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     req = request.Request(
         url=url,
         data=bytes(body),
-        headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Content-Length": str(len(body)),
-        },
+        headers=headers,
         method="POST",
     )
 
@@ -98,6 +103,12 @@ def main() -> None:
         default=None,
         help="Optional language tag (default: None, model defaults to pt-BR)",
     )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=os.environ.get("API_KEY", ""),
+        help="API key (Authorization: Bearer). Defaults to the API_KEY env var.",
+    )
 
     args = parser.parse_args()
 
@@ -111,6 +122,7 @@ def main() -> None:
         file_path=args.audio_file,
         response_format=args.format,
         language=args.language,
+        api_key=args.api_key.strip() or None,
     )
     elapsed = time.perf_counter() - t0
 

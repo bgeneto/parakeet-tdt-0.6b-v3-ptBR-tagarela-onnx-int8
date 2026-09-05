@@ -7,32 +7,53 @@ services:
     container_name: parakeet-stt
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:${PORT:-8080}"
     env_file:
       - path: .env
         required: false
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      CUDA_MODULE_LOADING: LAZY
-      MODEL_DIR: /opt/models/parakeet
-      GPU_MEM_LIMIT_GB: "6"
-      MAX_CHUNK_S: "30"
-      CHUNK_OVERLAP_S: "1.0"
-      CHUNKING: window
-      PREPROCESS_ON_GPU: "1"
-      MAX_CONCURRENT: "1"
-      SLEEP_IDLE_SECONDS: "60"
-      LOAD_AT_STARTUP: "1"
-      ORT_INTRA_THREADS: "4"
-      LOG_LEVEL: INFO
-      LANGUAGE: pt-BR
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-0}"
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
+      CUDA_MODULE_LOADING: "${CUDA_MODULE_LOADING:-LAZY}"
+      API_KEY: "${API_KEY:-}"
+      MODEL_DIR: "${MODEL_DIR:-/opt/models/parakeet}"
+      MODEL_ARCH: "${MODEL_ARCH:-nemo-conformer-tdt}"
+      QUANTIZATION: "${QUANTIZATION:-int8}"
+      LANGUAGE: "${LANGUAGE:-pt-BR}"
+      MODEL_ID: "${MODEL_ID:-parakeet-tdt-0.6b-v3-ptBR}"
+      GPU_ID: "${GPU_ID:-0}"
+      GPU_MEM_LIMIT_GB: "${GPU_MEM_LIMIT_GB:-6}"
+      CUDNN_CONV_ALGO_SEARCH: "${CUDNN_CONV_ALGO_SEARCH:-HEURISTIC}"
+      CUDNN_CONV_MAX_WORKSPACE: "${CUDNN_CONV_MAX_WORKSPACE:-1}"
+      ORT_ARENA_EXTEND: "${ORT_ARENA_EXTEND:-kNextPowerOfTwo}"
+      PREPROCESS_ON_GPU: "${PREPROCESS_ON_GPU:-1}"
+      CHUNKING: "${CHUNKING:-window}"
+      MAX_CHUNK_S: "${MAX_CHUNK_S:-30}"
+      CHUNK_OVERLAP_S: "${CHUNK_OVERLAP_S:-1.0}"
+      CHUNK_CONTEXT_S: "${CHUNK_CONTEXT_S:-0.5}"
+      CHUNK_LOOKBACK_S: "${CHUNK_LOOKBACK_S:-2.0}"
+      MIN_CHUNK_S: "${MIN_CHUNK_S:-0.5}"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-512}"
+      MAX_CONCURRENT: "${MAX_CONCURRENT:-1}"
+      ORT_INTRA_THREADS: "${ORT_INTRA_THREADS:-4}"
+      ORT_INTER_THREADS: "${ORT_INTER_THREADS:-2}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
+      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-4}"
+      SLEEP_IDLE_SECONDS: "${SLEEP_IDLE_SECONDS:-60}"
+      LOAD_AT_STARTUP: "${LOAD_AT_STARTUP:-1}"
+      CUDA_DEVICE_RESET: "${CUDA_DEVICE_RESET:-1}"
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-8080}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      UPLOAD_DIR: "${UPLOAD_DIR:-/tmp/stt}"
+      CORS_ENABLE: "${CORS_ENABLE:-1}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0"]
+              device_ids: ["${GPU_ID:-0}"]
               capabilities: [gpu]
     shm_size: "1gb"
     ulimits:
@@ -46,7 +67,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)",
+          "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT', '8080'), timeout=5)",
         ]
       interval: 30s
       timeout: 8s

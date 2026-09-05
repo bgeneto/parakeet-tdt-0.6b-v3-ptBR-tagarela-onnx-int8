@@ -71,6 +71,8 @@ parakeet-tdt-0.6b-v3-ptBR-tagarela-onnx-int8/
 ### 1. Construir e Iniciar o Contêiner
 
 ```bash
+cp .env.example .env
+# Defina API_KEY em .env antes de expor a porta publicamente.
 docker compose up -d --build
 ```
 
@@ -101,6 +103,7 @@ Resposta esperada:
 
 ```bash
 curl -sS -X POST http://localhost:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $API_KEY" \
   -F file=@audio_exemplo.m4a \
   -F response_format=verbose_json
 ```
@@ -129,6 +132,7 @@ Exemplo de resposta:
 
 ```bash
 curl -sS -X POST http://localhost:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $API_KEY" \
   -F file=@audio_exemplo.mp3 \
   -F response_format=json
 ```
@@ -145,6 +149,7 @@ Resposta:
 
 ```bash
 curl -sS -X POST http://localhost:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer $API_KEY" \
   -F file=@audio_exemplo.wav \
   -F response_format=text
 ```
@@ -156,7 +161,7 @@ curl -sS -X POST http://localhost:8080/v1/audio/transcriptions \
 O repositório inclui um cliente CLI pronto para uso, implementado apenas com a biblioteca padrão do Python (`urllib`):
 
 ```bash
-python3 client_example.py caminho/para/audio.mp3 --format verbose_json
+python3 client_example.py caminho/para/audio.mp3 --format verbose_json --api-key "$API_KEY"
 ```
 
 ---
@@ -166,11 +171,12 @@ python3 client_example.py caminho/para/audio.mp3 --format verbose_json
 Como o endpoint implementa o contrato `/v1/audio/transcriptions`, você pode utilizá-lo como substituto direto do Whisper no SDK oficial:
 
 ```python
+import os
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="nao-necessaria",
+    api_key=os.environ["API_KEY"],
 )
 
 with open("audio.m4a", "rb") as audio_file:
@@ -189,8 +195,8 @@ print("Texto transcrito:", transcription.text)
 
 | Método | Endpoint | Descrição |
 | :--- | :--- | :--- |
-| `POST` | `/v1/audio/transcriptions` | Endpoint principal de transcrição (compatível OpenAI). |
-| `POST` | `/transcribe` | Alias conveniente para transcrição. |
+| `POST` | `/v1/audio/transcriptions` | Endpoint principal de transcrição (compatível OpenAI). Exige `API_KEY` quando definida. |
+| `POST` | `/transcribe` | Alias conveniente para transcrição (mesma autenticação). |
 | `GET` | `/health` | Checagem de integridade (liveness probe). |
 | `GET` | `/ready` | Checagem de disponibilidade do modelo e providers ORT. |
 | `GET` | `/v1/models` | Lista de modelos disponíveis (compatível OpenAI). |
@@ -207,7 +213,8 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | `MODEL_ARCH` | `nemo-conformer-tdt` | Tipo ONNX-ASR deste checkpoint (`config.json`). |
 | `QUANTIZATION` | `int8` | Pesos INT8 (`encoder-model.int8.onnx`). |
 | `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
-| `GPU_ID` | `0` | Índice do dispositivo CUDA utilizado pelo ORT. |
+| `NVIDIA_VISIBLE_DEVICES` | `0` | GPU do host visível no contêiner (Compose). |
+| `GPU_ID` | `0` | Índice do dispositivo CUDA utilizado pelo ORT (dentro do contêiner). |
 | `GPU_MEM_LIMIT_GB` | `6` | Teto de VRAM do arena CUDA enquanto o modelo está carregado (GB). |
 | `MAX_CHUNK_S` | `30` | Janela do encoder (s). 30 s ocupa melhor a 3090 que 20 s; o decoder TDT continua O(T). |
 | `CHUNK_OVERLAP_S` | `1.0` | Sobreposição só para corte duro (silêncio não precisa de 2 s). |
@@ -225,7 +232,11 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | `ORT_INTER_THREADS`| `2` | Número de threads para paralelismo inter-operação do ONNX Runtime. |
 | `UPLOAD_DIR` | `/tmp/stt` | Diretório para escrita temporária dos arquivos recebidos (`tmpfs`). |
 | `LOG_LEVEL` | `INFO` | Nível de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
-| `API_KEY` | *(vazio)* | Se definido, exige `Authorization: Bearer …`. |
+| `HOST` | `0.0.0.0` | Bind do Uvicorn. |
+| `PORT` | `8080` | Porta HTTP (host e contêiner no Compose). |
+| `CORS_ENABLE` | `1` | Habilita CORS. `0` desliga. |
+| `CORS_ORIGINS` | `*` | Origens permitidas (lista separada por vírgula). |
+| `API_KEY` | *(vazio)* | Se definido, `/v1/audio/transcriptions` e `/transcribe` exigem `Authorization: Bearer …` ou `X-API-Key`. `/health` e `/ready` permanecem abertos. |
 
 ---
 

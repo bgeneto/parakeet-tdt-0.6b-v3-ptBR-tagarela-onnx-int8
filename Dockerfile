@@ -57,24 +57,47 @@ snapshot_download(\
 # --- App code: this is the only layer that changes on typical edits ---
 COPY --chown=stt:stt app.py /app/app.py
 
+# Runtime tunables (override with compose/.env / docker run -e). Do not bake API_KEY here.
 ENV MODEL_DIR=/opt/models/parakeet \
+    MODEL_ARCH=nemo-conformer-tdt \
+    QUANTIZATION=int8 \
+    LANGUAGE=pt-BR \
+    MODEL_ID=parakeet-tdt-0.6b-v3-ptBR \
     UPLOAD_DIR=/tmp/stt \
+    GPU_ID=0 \
     GPU_MEM_LIMIT_GB=6 \
+    CUDNN_CONV_ALGO_SEARCH=HEURISTIC \
+    CUDNN_CONV_MAX_WORKSPACE=1 \
+    ORT_ARENA_EXTEND=kNextPowerOfTwo \
+    PREPROCESS_ON_GPU=1 \
+    CHUNKING=window \
     MAX_CHUNK_S=30 \
+    CHUNK_OVERLAP_S=1.0 \
+    CHUNK_CONTEXT_S=0.5 \
+    CHUNK_LOOKBACK_S=2.0 \
+    MIN_CHUNK_S=0.5 \
+    MAX_UPLOAD_MB=512 \
     MAX_CONCURRENT=1 \
     SLEEP_IDLE_SECONDS=60 \
+    LOAD_AT_STARTUP=1 \
+    CUDA_DEVICE_RESET=1 \
     OMP_NUM_THREADS=4 \
     MKL_NUM_THREADS=4 \
-    ORT_INTRA_THREADS=4
+    ORT_INTRA_THREADS=4 \
+    ORT_INTER_THREADS=2 \
+    HOST=0.0.0.0 \
+    PORT=8080 \
+    LOG_LEVEL=INFO \
+    CORS_ENABLE=1 \
+    CORS_ORIGINS=* \
+    API_KEY=""
 
 USER stt
 EXPOSE 8080
 
 # Liveness only — /ready may report model_loaded=false after idle sleep.
 HEALTHCHECK --interval=30s --timeout=8s --start-period=90s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8080'), timeout=5)"
 
 STOPSIGNAL SIGINT
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", \
-     "--workers", "1", "--loop", "uvloop", "--http", "httptools", \
-     "--timeout-keep-alive", "30", "--access-log"]
+CMD ["sh", "-c", "exec uvicorn app:app --host \"${HOST:-0.0.0.0}\" --port \"${PORT:-8080}\" --workers 1 --loop uvloop --http httptools --timeout-keep-alive 30 --access-log"]

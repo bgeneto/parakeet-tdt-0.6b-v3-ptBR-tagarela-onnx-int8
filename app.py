@@ -8,6 +8,7 @@ import gc
 import logging
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -717,6 +718,10 @@ async def lifespan(app: FastAPI):
     if SLEEP_IDLE_SECONDS > 0:
         _idle_task = asyncio.create_task(_idle_watcher(), name="stt-idle-sleep")
         LOG.info("idle sleep ativo: %.0fs sem requests → unload GPU", SLEEP_IDLE_SECONDS)
+    if API_KEY:
+        LOG.info("API key ativa — transcrição exige Authorization: Bearer … ou X-API-Key")
+    else:
+        LOG.warning("API_KEY vazio — /v1/audio/transcriptions e /transcribe estão públicos")
     yield
     if _idle_task is not None:
         _idle_task.cancel()
@@ -742,12 +747,28 @@ if _env_flag("CORS_ENABLE", "1"):
     )
 
 
-async def _check_api_key(authorization: str | None = Header(None)) -> None:
+async def _check_api_key(
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+) -> None:
+    """Require API_KEY on transcription routes when the env var is set.
+
+    Accepts ``Authorization: Bearer <key>`` (OpenAI SDK) or ``X-API-Key``.
+    Health/ready stay unauthenticated for Docker probes.
+    """
     if not API_KEY:
         return
-    expected = f"Bearer {API_KEY}"
-    if authorization != expected:
-        raise HTTPException(401, "API key inválida")
+    token = (x_api_key or "").strip()
+    if not token and authorization:
+        scheme, _, remainder = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            token = remainder.strip()
+    if not token or not secrets.compare_digest(token, API_KEY):
+        raise HTTPException(
+            status_code=401,
+            detail="API key inválida",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @app.get("/health")
