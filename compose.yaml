@@ -17,7 +17,9 @@ services:
       CUDA_MODULE_LOADING: LAZY
       MODEL_DIR: /opt/models/parakeet
       GPU_MEM_LIMIT_GB: "4"
-      MAX_CHUNK_S: "25"
+      MAX_CHUNK_S: "20"
+      CHUNK_OVERLAP_S: "1.0"
+      CHUNKING: window
       MAX_CONCURRENT: "1"
       SLEEP_IDLE_SECONDS: "60"
       LOAD_AT_STARTUP: "1"

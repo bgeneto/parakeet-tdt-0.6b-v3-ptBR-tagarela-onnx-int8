@@ -212,8 +212,10 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | `SLEEP_IDLE_SECONDS` | `60` | Segundos sem request até unload da GPU. `0` desliga o sleep. |
 | `LOAD_AT_STARTUP` | `1` | Carrega o modelo no boot. `0` = lazy load na primeira request. |
 | `CUDA_DEVICE_RESET` | `1` | Após unload, chama `cudaDeviceReset` para devolver VRAM ao driver. |
-| `MAX_CHUNK_S` | `25` | Tamanho máximo em segundos de um segmento antes de corte por silêncio. |
-| `MIN_CHUNK_S` | `0.25` | Tamanho mínimo em segundos para considerar uma fala válida. |
+| `MAX_CHUNK_S` | `20` | Janela acústica em segundos (contexto longo, como o Whisper). |
+| `CHUNK_OVERLAP_S` | `1.0` | Sobreposição entre janelas para não perder palavras na junta. |
+| `CHUNKING` | `window` | `window` (padrão, qualidade) ou `vad` (só silêncio longo). |
+| `MIN_CHUNK_S` | `0.5` | Tamanho mínimo da última janela. |
 | `MAX_CONCURRENT` | `1` | Número máximo de inferências simultâneas na GPU. |
 | `MAX_UPLOAD_MB` | `512` | Tamanho máximo do arquivo de upload. |
 | `ORT_INTRA_THREADS`| `4` | Número de threads para paralelismo intra-operação do ONNX Runtime. |

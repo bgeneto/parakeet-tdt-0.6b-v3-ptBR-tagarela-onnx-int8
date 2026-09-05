@@ -7,6 +7,7 @@ import ctypes
 import gc
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -31,8 +32,13 @@ QUANTIZATION = os.environ.get("QUANTIZATION", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "pt-BR")
 MODEL_ID = os.environ.get("MODEL_ID", "parakeet-tdt-0.6b-v3-ptBR")
 SR = 16000
-MAX_CHUNK_S = float(os.environ.get("MAX_CHUNK_S", "25"))
-MIN_CHUNK_S = float(os.environ.get("MIN_CHUNK_S", "0.25"))
+# Parakeet TDT needs long acoustic context (Whisper uses ~30s). Tiny VAD
+# fragments were the main quality killer on conversational pt-BR.
+MAX_CHUNK_S = float(os.environ.get("MAX_CHUNK_S", "20"))
+CHUNK_OVERLAP_S = float(os.environ.get("CHUNK_OVERLAP_S", "1.0"))
+MIN_CHUNK_S = float(os.environ.get("MIN_CHUNK_S", "0.5"))
+CHUNKING = os.environ.get("CHUNKING", "window").strip().lower()
+_SPACE_RE = re.compile(r"\A\s|\s\B|(\s)\b")
 GPU_ID = int(os.environ.get("GPU_ID", "0"))
 GPU_MEM_LIMIT_GB = float(os.environ.get("GPU_MEM_LIMIT_GB", "4"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
@@ -179,10 +185,7 @@ class AsrEngine:
     def recognize_pcm(self, pcm: np.ndarray) -> Any:
         with self._lock:
             self._load_unlocked()
-            if pcm.dtype != np.float32:
-                pcm = pcm.astype(np.float32, copy=False)
-            if pcm.ndim > 1:
-                pcm = pcm.reshape(-1)
+            pcm = np.ascontiguousarray(pcm, dtype=np.float32).reshape(-1)
             return self.model.recognize(pcm, sample_rate=SR)
 
     def _load_unlocked(self) -> None:
@@ -242,16 +245,93 @@ def ffmpeg_pcm_proc(src: Path) -> subprocess.Popen:
     )
 
 
-def iter_utterances(
+def _pcm16le(raw: bytes) -> np.ndarray:
+    if len(raw) < 2:
+        return np.zeros(0, dtype=np.float32)
+    pcm = np.frombuffer(raw, dtype=np.int16, count=len(raw) // 2)
+    return np.ascontiguousarray(pcm.astype(np.float32) * (1.0 / 32768.0))
+
+
+def iter_audio(
     src: Path,
     max_s: float = MAX_CHUNK_S,
+    overlap_s: float = CHUNK_OVERLAP_S,
     min_s: float = MIN_CHUNK_S,
+) -> Iterator[tuple[float, float, float, np.ndarray]]:
+    """ffmpeg → 16 kHz mono windows with overlap. Yields (start, end, drop_before, pcm).
+
+    drop_before is seconds to discard at the start of the *new* window so overlap
+    is used as encoder context but not transcribed twice.
+    """
+    if CHUNKING == "vad":
+        yield from _iter_vad(src, max_s, min_s)
+        return
+    yield from _iter_windows(src, max_s, overlap_s, min_s)
+
+
+def _close_ffmpeg(proc: subprocess.Popen, emitted: bool) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        _, err = proc.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        err = b""
+    if proc.returncode not in (0, None, -9) and not emitted:
+        msg = (err or b"").decode("utf-8", "replace")[-2000:]
+        raise RuntimeError(f"ffmpeg falhou (rc={proc.returncode}): {msg}")
+
+
+def _iter_windows(
+    src: Path, max_s: float, overlap_s: float, min_s: float
+) -> Iterator[tuple[float, float, float, np.ndarray]]:
+    chunk_n = max(1, int(SR * max_s))
+    overlap_n = int(SR * max(0.0, min(overlap_s, max_s - min_s)))
+    hop_n = max(1, chunk_n - overlap_n)
+    min_n = int(SR * min_s)
+    drop_s = overlap_n / SR
+    proc = ffmpeg_pcm_proc(src)
+    if proc.stdout is None:
+        raise RuntimeError("ffmpeg stdout indisponível")
+    carry = np.zeros(0, dtype=np.float32)
+    file_samples = 0
+    first = True
+    emitted = False
+    try:
+        while True:
+            raw = proc.stdout.read(hop_n * 2)
+            if not raw:
+                break
+            pcm = _pcm16le(raw)
+            if pcm.size == 0:
+                break
+            carry = np.concatenate([carry, pcm]) if carry.size else pcm
+            file_samples += pcm.size
+            while carry.size >= chunk_n:
+                window = carry[:chunk_n]
+                start = (file_samples - carry.size) / SR
+                yield start, start + window.size / SR, (0.0 if first else drop_s), window
+                emitted = True
+                first = False
+                carry = carry[hop_n:]
+        if carry.size >= min_n:
+            start = (file_samples - carry.size) / SR
+            yield start, start + carry.size / SR, (0.0 if first else drop_s), carry
+            emitted = True
+    finally:
+        _close_ffmpeg(proc, emitted)
+
+
+def _iter_vad(
+    src: Path,
+    max_s: float,
+    min_s: float,
     frame_ms: int = 30,
-    hangover_ms: int = 400,
-    pad_ms: int = 200,
-    abs_thresh: float = 0.010,
-) -> Iterator[tuple[float, float, np.ndarray]]:
-    """Decode ffmpeg → 16 kHz mono e fatia por energia (VAD) sem carregar o arquivo inteiro."""
+    hangover_ms: int = 1500,
+    pad_ms: int = 300,
+    abs_thresh: float = 0.008,
+) -> Iterator[tuple[float, float, float, np.ndarray]]:
+    """Optional energy VAD. Default hangover is 1.5s so conversational pauses stay in-context."""
     proc = ffmpeg_pcm_proc(src)
     if proc.stdout is None:
         raise RuntimeError("ffmpeg stdout indisponível")
@@ -261,7 +341,6 @@ def iter_utterances(
     max_n = int(SR * max_s)
     min_n = int(SR * min_s)
     bytes_frame = frame_n * 2
-
     noise = 0.003
     in_speech = False
     sil_run = 0
@@ -275,25 +354,20 @@ def iter_utterances(
     def emit(end_samples: int, arr: np.ndarray):
         if arr.size < min_n:
             return None
-        start = max(0.0, utt_start)
-        end = end_samples / SR
-        return start, end, arr
+        return max(0.0, utt_start), end_samples / SR, 0.0, arr
 
     try:
         while True:
             raw = proc.stdout.read(bytes_frame)
             if not raw:
                 break
-            if len(raw) < 2:
+            pcm = _pcm16le(raw)
+            if pcm.size == 0:
                 break
-            n = len(raw) // 2
-            pcm = np.frombuffer(raw, dtype=np.int16, count=n).astype(np.float32)
-            pcm /= 32768.0
+            n = pcm.size
             rms = float(np.sqrt(np.mean(pcm * pcm) + 1e-12))
             noise = 0.995 * noise + 0.005 * rms
-            thresh = max(abs_thresh, 3.2 * noise)
-            is_sp = rms > thresh
-
+            is_sp = rms > max(abs_thresh, 3.2 * noise)
             if is_sp and not in_speech:
                 in_speech = True
                 sil_run = 0
@@ -309,8 +383,7 @@ def iter_utterances(
                 else:
                     sil_run += 1
                     if sil_run >= hang_frames and buf_n >= min_n:
-                        arr = np.concatenate(buf)
-                        item = emit(t_samples + n, arr)
+                        item = emit(t_samples + n, np.concatenate(buf))
                         if item:
                             emitted = True
                             yield item
@@ -318,7 +391,7 @@ def iter_utterances(
                         buf, buf_n = [], 0
                 if buf_n >= max_n:
                     arr = np.concatenate(buf)
-                    cut = _cut_at_silence(arr, SR, thresh)
+                    cut = max(min_n, arr.size - int(SR * 1.0))
                     item = emit(t_samples + n - (arr.size - cut), arr[:cut])
                     if item:
                         emitted = True
@@ -329,80 +402,20 @@ def iter_utterances(
                     utt_start = (t_samples + n - rest.size) / SR
                     in_speech = buf_n > 0
                     sil_run = 0
-            else:
-                if pad_n > 0:
-                    pre_roll = np.concatenate([pre_roll, pcm])[-pad_n:]
+            elif pad_n > 0:
+                pre_roll = np.concatenate([pre_roll, pcm])[-pad_n:]
             t_samples += n
-
         if in_speech and buf_n >= min_n:
-            arr = np.concatenate(buf)
-            item = emit(t_samples, arr)
+            item = emit(t_samples, np.concatenate(buf))
             if item:
                 emitted = True
                 yield item
-
         if not emitted and t_samples >= min_n:
             if proc.poll() is None:
                 proc.kill()
-            yield from _naive_chunks(src, max_s)
+            yield from _iter_windows(src, max_s, CHUNK_OVERLAP_S, min_s)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            _, err = proc.communicate(timeout=8)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            err = b""
-        if proc.returncode not in (0, None, -9) and not emitted:
-            msg = (err or b"").decode("utf-8", "replace")[-2000:]
-            raise RuntimeError(f"ffmpeg falhou (rc={proc.returncode}): {msg}")
-
-
-def _cut_at_silence(arr: np.ndarray, sr: int, thresh: float, lookback_s: float = 2.0) -> int:
-    win = int(sr * 0.03)
-    look = min(arr.size, int(sr * lookback_s))
-    region = arr[-look:]
-    min_keep = int(sr * MIN_CHUNK_S)
-    fallback = max(min_keep, int(arr.size * 0.85))
-    if region.size < win * 4:
-        return fallback
-    hop = win
-    best_i, best_rms = None, 1.0
-    for i in range(0, region.size - win, hop):
-        sl = region[i : i + win]
-        r = float(np.sqrt(np.mean(sl * sl) + 1e-12))
-        if r < best_rms:
-            best_rms, best_i = r, i
-    if best_i is None or best_rms > thresh:
-        return fallback
-    cut = arr.size - look + best_i
-    return cut if cut > min_keep else fallback
-
-
-def _naive_chunks(src: Path, max_s: float) -> Iterator[tuple[float, float, np.ndarray]]:
-    proc = ffmpeg_pcm_proc(src)
-    if proc.stdout is None:
-        raise RuntimeError("ffmpeg stdout indisponível")
-    step = int(SR * max_s) * 2
-    t = 0.0
-    try:
-        while True:
-            raw = proc.stdout.read(step)
-            if not raw:
-                break
-            pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-            dur = pcm.size / SR
-            if dur < MIN_CHUNK_S:
-                break
-            yield t, t + dur, pcm
-            t += dur
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            proc.communicate(timeout=8)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _close_ffmpeg(proc, emitted)
 
 
 def _token_words(
@@ -436,6 +449,41 @@ def _token_words(
     return words
 
 
+def _tokens_to_text(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+    return _SPACE_RE.sub(lambda m: " " if m.group(1) else "", "".join(tokens)).strip()
+
+
+def _unwrap_asr(result: Any) -> Any:
+    if isinstance(result, (list, tuple)):
+        return result[0] if result else None
+    return result
+
+
+def _result_fields(result: Any, drop_before: float) -> tuple[str, list[float], list[str], list[float]]:
+    """Take .text from TimestampedResult — never str(result), which leaked empty dataclasses."""
+    result = _unwrap_asr(result)
+    if result is None:
+        return "", [], [], []
+    if isinstance(result, str):
+        return result.strip(), [], [], []
+    tokens = list(getattr(result, "tokens", None) or [])
+    timestamps = [float(t) for t in (getattr(result, "timestamps", None) or [])]
+    logprobs = [float(x) for x in (getattr(result, "logprobs", None) or [])]
+    if drop_before > 0 and timestamps and tokens:
+        n = min(len(tokens), len(timestamps))
+        keep = [i for i in range(n) if timestamps[i] >= drop_before]
+        tokens = [tokens[i] for i in keep]
+        timestamps = [timestamps[i] for i in keep]
+        logprobs = [logprobs[i] for i in keep] if logprobs else []
+        text = _tokens_to_text(tokens)
+    else:
+        raw = getattr(result, "text", None)
+        text = raw.strip() if isinstance(raw, str) else _tokens_to_text(tokens)
+    return text, timestamps, tokens, logprobs
+
+
 def transcribe_file(path: Path, want_words: bool = False) -> dict:
     if engine is None:
         raise RuntimeError("engine indisponível")
@@ -444,20 +492,16 @@ def transcribe_file(path: Path, want_words: bool = False) -> dict:
     segments: list[dict] = []
     words_out: list[dict] = []
     last_end = 0.0
-    for start, end, pcm in iter_utterances(path):
-        result = engine.recognize_pcm(pcm)
-        text = (getattr(result, "text", None) or str(result) or "").strip()
-        ts = getattr(result, "timestamps", None)
-        tokens = getattr(result, "tokens", None)
-        logprobs = getattr(result, "logprobs", None)
+    for start, end, drop_before, pcm in iter_audio(path):
+        text, ts, tokens, logprobs = _result_fields(engine.recognize_pcm(pcm), drop_before)
         last_end = end
         if not text:
             continue
         if ts:
-            seg_start = start + float(ts[0])
-            seg_end = start + float(ts[-1])
+            seg_start = start + ts[0]
+            seg_end = start + ts[-1]
         else:
-            seg_start, seg_end = start, end
+            seg_start, seg_end = start + drop_before, end
         avg_lp = float(np.mean(logprobs)) if logprobs else 0.0
         parts.append(text)
         segments.append(
@@ -467,7 +511,7 @@ def transcribe_file(path: Path, want_words: bool = False) -> dict:
                 "start": round(seg_start, 3),
                 "end": round(seg_end, 3),
                 "text": text,
-                "tokens": tokens or [],
+                "tokens": tokens,
                 "temperature": 0.0,
                 "avg_logprob": round(avg_lp, 5),
                 "compression_ratio": 1.0,
