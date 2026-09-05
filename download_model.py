@@ -29,7 +29,7 @@ def download_model(repo_id: str, local_dir: str | Path) -> None:
     snapshot_download(
         repo_id=repo_id,
         local_dir=str(dest),
-        local_dir_use_symlinks=False,
+        ignore_patterns=["*.md", ".gitattributes"],
     )
     print(f"Model successfully downloaded to: {dest}")
 

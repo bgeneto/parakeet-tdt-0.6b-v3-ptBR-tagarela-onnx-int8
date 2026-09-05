@@ -8,6 +8,9 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
     environment:
       NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -16,13 +19,18 @@ services:
       GPU_MEM_LIMIT_GB: "4"
       MAX_CHUNK_S: "25"
       MAX_CONCURRENT: "1"
+      SLEEP_IDLE_SECONDS: "60"
+      LOAD_AT_STARTUP: "1"
       ORT_INTRA_THREADS: "4"
       LOG_LEVEL: INFO
       LANGUAGE: pt-BR
-    gpus:
-      - driver: nvidia
-        device_ids: ["0"]
-        capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
     shm_size: "1gb"
     ulimits:
       memlock: -1

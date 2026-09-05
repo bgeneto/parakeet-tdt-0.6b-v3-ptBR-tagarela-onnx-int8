@@ -7,7 +7,7 @@ Servidor de Speech-to-Text (STT) de alta performance e produção para **Portugu
 ## Destaques do Projeto
 
 - **Ultraleve e Rápido**: Executa com **ONNX Runtime (CUDA Execution Provider)** sem dependências pesadas de PyTorch ou NeMo em tempo de inferência.
-- **Pegada de VRAM Reduzida**: Ocupa apenas **~2 a 4 GB de VRAM**, deixando mais de 20 GB livres em placas como RTX 3090 / 4090 / A5000 para outros modelos (LLMs, TTS, etc.).
+- **Pegada de VRAM Reduzida**: INT8 + `gpu_mem_limit` de 4 GB enquanto o modelo está carregado. Após `SLEEP_IDLE_SECONDS` sem requests, as sessões ORT são destruídas e a GPU sofre `cudaDeviceReset`, devolvendo a VRAM ao driver (mesmo padrão do `llama-server --sleep-idle-seconds`).
 - **Streaming VAD (Voice Activity Detection)**: Decodificação contínua via `ffmpeg` fatiada dinamicamente por energia acústica. Processa áudios de qualquer formato e de **duração ilimitada sem estourar RAM ou VRAM**.
 - **Compatível com OpenAI API**: Endpoint compatível com `/v1/audio/transcriptions`, permitindo integração direta com bibliotecas existentes e com o SDK oficial da OpenAI.
 - **Air-Gap / Self-Contained**: O modelo ONNX INT8 é baixado e congelado dentro da imagem Docker na etapa de build, garantindo inicialização confiável e sem dependência externa em runtime.
@@ -31,8 +31,9 @@ flowchart LR
 | Escolha | Motivo técnico |
 | :--- | :--- |
 | **ONNX INT8 + `onnxruntime-gpu` (CUDA EP)** | Menor uso de VRAM e maior throughput; elimina overhead de PyTorch e NeMo em produção. |
-| **`cpu_preprocessing=True`** | Extração de mel spectrogram (`nemo128.onnx`) no CPU, reservando a GPU estritamente para o encoder acústico e decodificador TDT. |
-| **`gpu_mem_limit` 4 GB** | O modelo 0.6B INT8 não necessita de mais que 4 GB; evita que o ORT aloje toda a VRAM da placa. |
+| **Preprocessor no CPU (NumPy)** | Mel spectrogram fora da GPU; VRAM só para encoder/decoder TDT INT8. |
+| **`gpu_mem_limit` 4 GB** | Teto do arena CUDA enquanto o modelo está acordado; não reserva os 24 GB da 3090. |
+| **`SLEEP_IDLE_SECONDS` (default 60)** | Sem tráfego, unload + `cudaDeviceReset`. A próxima request recarrega o INT8 (warmup ~1–3 s). |
 | **`ffmpeg` → PCM 16 kHz mono pipe** | Suporta qualquer container/codec: MP3, MP4, M4A, AAC, OGG, OPUS, FLAC, WEBM, MKV, WAV, etc. |
 | **VAD em streaming** | Duração de áudio ilimitada; o uso de RAM é proporcional a 1 chunk (~25s) e não ao tamanho total do arquivo. |
 | **1 worker Uvicorn + Semaphore Lock** | A sessão ORT/CUDA não é segura para múltiplos processos bifurcados (fork-unsafe). Como a inferência ocorre a dezenas de vezes a velocidade de tempo-real, a fila em semáforo serializa requisições sem contenção de contexto CUDA. |
@@ -81,13 +82,13 @@ O download do modelo (~1.4 GB) ocorre durante o build da imagem Docker.
 # Liveness
 curl -s http://localhost:8080/health
 
-# Readiness (confirma se o modelo foi carregado e os providers disponíveis)
+# Readiness (modelo pode estar unloaded após idle sleep)
 curl -s http://localhost:8080/ready
 ```
 
 Resposta esperada:
 ```json
-{"status":"ready","providers":["CUDAExecutionProvider","CPUExecutionProvider"]}
+{"status":"ready","model_loaded":true,"sleep_idle_seconds":60,"providers":["CUDAExecutionProvider","CPUExecutionProvider"],"vram_used_mb":2100.0}
 ```
 
 ---
@@ -203,26 +204,32 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | Variável | Padrão | Descrição |
 | :--- | :--- | :--- |
 | `MODEL_DIR` | `/opt/models/parakeet` | Diretório onde os artefatos do modelo ONNX residem. |
-| `MODEL_ARCH` | `nemo-parakeet-tdt-0.6b-v3` | Identificador de arquitetura para o `onnx-asr`. |
-| `QUANTIZATION` | `int8` | Tipo de quantização (`int8`, `fp16`, etc.). |
+| `MODEL_ARCH` | `nemo-conformer-tdt` | Tipo ONNX-ASR deste checkpoint (`config.json`). |
+| `QUANTIZATION` | `int8` | Pesos INT8 (`encoder-model.int8.onnx`). |
 | `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
 | `GPU_ID` | `0` | Índice do dispositivo CUDA utilizado pelo ORT. |
-| `GPU_MEM_LIMIT_GB` | `4` | Limite de VRAM alocado para o pool de memória da GPU (em GB). |
+| `GPU_MEM_LIMIT_GB` | `4` | Teto de VRAM do arena CUDA enquanto o modelo está carregado (GB). |
+| `SLEEP_IDLE_SECONDS` | `60` | Segundos sem request até unload da GPU. `0` desliga o sleep. |
+| `LOAD_AT_STARTUP` | `1` | Carrega o modelo no boot. `0` = lazy load na primeira request. |
+| `CUDA_DEVICE_RESET` | `1` | Após unload, chama `cudaDeviceReset` para devolver VRAM ao driver. |
 | `MAX_CHUNK_S` | `25` | Tamanho máximo em segundos de um segmento antes de corte por silêncio. |
 | `MIN_CHUNK_S` | `0.25` | Tamanho mínimo em segundos para considerar uma fala válida. |
 | `MAX_CONCURRENT` | `1` | Número máximo de inferências simultâneas na GPU. |
+| `MAX_UPLOAD_MB` | `512` | Tamanho máximo do arquivo de upload. |
 | `ORT_INTRA_THREADS`| `4` | Número de threads para paralelismo intra-operação do ONNX Runtime. |
 | `ORT_INTER_THREADS`| `2` | Número de threads para paralelismo inter-operação do ONNX Runtime. |
 | `UPLOAD_DIR` | `/tmp/stt` | Diretório para escrita temporária dos arquivos recebidos (`tmpfs`). |
 | `LOG_LEVEL` | `INFO` | Nível de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+| `API_KEY` | *(vazio)* | Se definido, exige `Authorization: Bearer …`. |
 
 ---
 
 ## Dicas de Desempenho e Ajustes
 
-- **Para máxima taxa de transferência (throughput)**: Mantenha `GPU_MEM_LIMIT_GB=4` e `MAX_CHUNK_S=25`.
-- **Para menor latência por segmento**: Se o caso de uso exigir resposta rápida para áudios longos contínuos, reduza `MAX_CHUNK_S=20` ou `15`.
-- **TensorRT**: Não é recomendado utilizar o TensorRT Execution Provider para este modelo INT8 pré-quantizado, pois sem cache de calibração explícito pode ocorrer degradação de desempenho ou falhas de build de engine. O `CUDAExecutionProvider` do ONNX Runtime oferece estabilidade e velocidade otimizadas.
+- **Throughput com o modelo quente**: `GPU_MEM_LIMIT_GB=4`, `MAX_CHUNK_S=25`, `SLEEP_IDLE_SECONDS=0` (nunca descarrega).
+- **VRAM mínima quando ocioso**: `SLEEP_IDLE_SECONDS=60` (padrão). A 3090 fica livre para LLM/TTS até a próxima transcrição.
+- **Primeira request após o sleep**: recarrega INT8 + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`).
+- **TensorRT**: não use TRT neste INT8 dinâmico (MatMul-only, sem calibração). CUDA EP é o caminho suportado.
 
 ---
 
@@ -241,7 +248,7 @@ Caso prefira rodar diretamente no host Linux com ambiente virtual Python:
    source .venv/bin/activate
    pip install -r requirements.txt
    pip uninstall -y onnxruntime || true
-   pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.20.0,<1.23.0"
+   pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.22.0,<1.27.0"
    ```
 
 3. **Baixe o modelo**:
