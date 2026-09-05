@@ -79,16 +79,13 @@ find /opt/venv -type f \( -name "*.pyi" -o -name "*.pyc" \) -delete
 chown -R stt:stt /opt/venv
 EOF
 
-# --- Model: independent of app.py; Hub blob cache is a mount, not an image layer ---
+# --- Model: download_model.py pins repo/revision; Hub blob cache is a mount ---
+# ARG must be consumed in this RUN so changing USE_QUANTIZATION busts the cache.
+ARG USE_QUANTIZATION=true
+COPY --chown=stt:stt download_model.py /app/download_model.py
 RUN --mount=type=cache,target=/root/.cache/huggingface \
-    HF_HOME=/root/.cache/huggingface python -c "\
-from huggingface_hub import snapshot_download;\
-snapshot_download(\
-    repo_id='calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8',\
-    revision='7d84392553633a8e5bdca7eccb5ae25467e9572f',\
-    local_dir='/opt/models/parakeet',\
-    ignore_patterns=['*.md', '.gitattributes'],\
-)" \
+    USE_QUANTIZATION=${USE_QUANTIZATION} HF_HOME=/root/.cache/huggingface \
+    python download_model.py --dest /opt/models/parakeet \
     && chown -R stt:stt /opt/models
 
 # --- App code: this is the only layer that changes on typical edits ---

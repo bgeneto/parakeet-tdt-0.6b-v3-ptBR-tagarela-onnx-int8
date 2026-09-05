@@ -11,6 +11,7 @@ Servidor de Speech-to-Text (STT) de alta performance e produção para **Portugu
 - **Streaming VAD (Voice Activity Detection)**: Decodificação contínua via `ffmpeg` fatiada dinamicamente por energia acústica. Processa áudios de qualquer formato e de **duração ilimitada sem estourar RAM ou VRAM**.
 - **Compatível com OpenAI API**: Endpoint compatível com `/v1/audio/transcriptions`, permitindo integração direta com bibliotecas existentes e com o SDK oficial da OpenAI.
 - **Air-Gap / Self-Contained**: O modelo ONNX escolhido (`USE_QUANTIZATION`) é baixado e congelado dentro da imagem Docker na etapa de build, garantindo inicialização confiável e sem dependência externa em runtime.
+- **Imagem Docker ~4.3 GB**: parte de `nvidia/cuda:12.4.1-base` e copia só as libs que o ONNX Runtime CUDA EP realmente liga (`ldd`). Fora da imagem: **NPP, NCCL, cuSOLVER, cuSPARSE, nvJPEG e cuFile** (não usadas neste STT de GPU única). Permanecem cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN 9.
 
 ---
 
@@ -31,6 +32,7 @@ flowchart LR
 | Escolha | Motivo técnico |
 | :--- | :--- |
 | **ONNX INT8 + `onnxruntime-gpu` (CUDA EP)** | Menor uso de VRAM e maior throughput; elimina overhead de PyTorch e NeMo em produção. |
+| **CUDA slim (`*-base` + cópia seletiva)** | A imagem `cudnn-runtime` inteira traz NPP/NCCL/cuSOLVER/cuSPARSE (~1 GB+) inúteis para este servidor. O Dockerfile copia só cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN. Imagem final **~4.3 GB** (`docker images`). |
 | **Preprocessor no CPU (NumPy)** | Mel spectrogram fora da GPU; VRAM só para encoder/decoder TDT INT8. |
 | **`gpu_mem_limit` 4 GB** | Teto do arena CUDA enquanto o modelo está acordado; não reserva os 24 GB da 3090. |
 | **`SLEEP_IDLE_SECONDS` (default 60)** | Sem tráfego, unload + `cudaDeviceReset`. A próxima request recarrega o INT8 (warmup ~1–3 s). |
@@ -44,7 +46,7 @@ flowchart LR
 
 ```
 parakeet-tdt-0.6b-v3-ptBR-tagarela-onnx-int8/
-├── Dockerfile             # Imagem de produção CUDA 12.4.1 com modelo embutido
+├── Dockerfile             # Imagem ~4.3 GB: CUDA base + libs ORT; sem NPP/NCCL/cuSOLVER/cuSPARSE
 ├── compose.yaml           # Orquestração Docker Compose com reservas de GPU e tmpfs
 ├── requirements.txt       # Dependências Python (onnx-asr, onnxruntime-gpu, FastAPI)
 ├── app.py                 # Servidor FastAPI com VAD streaming e motor ASR
@@ -78,7 +80,12 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-O download do modelo ocorre durante o build da imagem Docker.
+O download do modelo ocorre durante o build da imagem Docker. A imagem resultante (`parakeet-stt-ptbr:1.0.0`) fica em torno de **4.3 GB** no `docker images`: o estágio final usa `nvidia/cuda:12.4.1-base-ubuntu22.04` e recebe só cuBLAS, cuBLASLt, cuFFT, cuRAND, NVRTC e cuDNN 9. Pacotes da imagem `cudnn-runtime` **não copiados** (o CUDA EP do ORT não liga esses `.so`):
+
+- **NPP** — primitivas de imagem/vídeo
+- **NCCL** — comunicação multi-GPU
+- **cuSOLVER** / **cuSPARSE** — álgebra densa/esparsa de solver
+- **nvJPEG** / **cuFile** — JPEG na GPU e GPUDirect Storage
 
 ### 2. Verificar Prontidão
 
@@ -248,6 +255,7 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 - **VRAM mínima quando ocioso**: `SLEEP_IDLE_SECONDS=60` (padrão). A 3090 fica livre para LLM/TTS até a próxima transcrição.
 - **Primeira request após o sleep**: recarrega INT8 + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`).
 - **TensorRT**: não use TRT neste INT8 dinâmico (MatMul-only, sem calibração). CUDA EP é o caminho suportado.
+- **Tamanho da imagem (~4.3 GB)**: não volte para `nvidia/cuda:*-cudnn-runtime` como estágio final — isso reintroduz NPP, NCCL, cuSOLVER e cuSPARSE sem ganho de transcrição.
 
 ---
 
