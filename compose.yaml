@@ -1,0 +1,48 @@
+services:
+  parakeet-stt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: parakeet-stt-ptbr:1.0.0
+    container_name: parakeet-stt
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_MODULE_LOADING: LAZY
+      MODEL_DIR: /opt/models/parakeet
+      GPU_MEM_LIMIT_GB: "4"
+      MAX_CHUNK_S: "25"
+      MAX_CONCURRENT: "1"
+      ORT_INTRA_THREADS: "4"
+      LOG_LEVEL: INFO
+      LANGUAGE: pt-BR
+    gpus:
+      - driver: nvidia
+        device_ids: ["0"]
+        capabilities: [gpu]
+    shm_size: "1gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    tmpfs:
+      - /tmp/stt:uid=1000,gid=1000,mode=1777,size=16g
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
