@@ -52,29 +52,32 @@ WORKDIR /app
 # --- Python deps: checksum of this file is the only pip cache key ---
 COPY requirements.txt .
 # Cache mount: image stays cache-free; rebuilds of *this* layer reuse wheels.
-# Quote the GPU spec: unquoted > / < are shell redirects.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt \
-    && pip uninstall -y onnxruntime || true \
-    && pip install --no-cache-dir --force-reinstall --no-deps "onnxruntime-gpu>=1.22.0,<1.27.0" \
-    && python -c "\
+# Heredoc: a python -c block with real newlines is parsed as new Dockerfile
+# instructions unless every line ends in `\` (and then Python needs `;`).
+RUN --mount=type=cache,target=/root/.cache/pip <<'EOF'
+set -e
+pip install --no-cache-dir -r requirements.txt
+pip uninstall -y onnxruntime || true
+pip install --no-cache-dir --force-reinstall --no-deps "onnxruntime-gpu>=1.22.0,<1.27.0"
+python - <<'PY'
 import glob, os, subprocess, sys
 import onnxruntime as o
-getattr(o, 'preload_dlls', lambda **k: None)()
+getattr(o, "preload_dlls", lambda **k: None)()
 p = o.get_available_providers()
 print(p)
-assert 'CUDAExecutionProvider' in p, p
-sos = glob.glob('/opt/venv/lib/python3.*/site-packages/onnxruntime/capi/libonnxruntime_providers_cuda.so')
-assert sos, 'cuda EP .so missing'
-out = subprocess.check_output(['ldd', sos[0]], text=True)
-missing = [ln for ln in out.splitlines() if 'not found' in ln]
+assert "CUDAExecutionProvider" in p, p
+sos = glob.glob("/opt/venv/lib/python3.*/site-packages/onnxruntime/capi/libonnxruntime_providers_cuda.so")
+assert sos, "cuda EP .so missing"
+out = subprocess.check_output(["ldd", sos[0]], text=True)
+missing = [ln for ln in out.splitlines() if "not found" in ln]
 if missing:
-    sys.stderr.write('\n'.join(missing) + '\n')
-    raise SystemExit('CUDA EP has unresolved libraries')
-" \
-    && find /opt/venv -depth -type d -name '__pycache__' -exec rm -rf {} + \
-    && find /opt/venv -type f \( -name '*.pyi' -o -name '*.pyc' \) -delete \
-    && chown -R stt:stt /opt/venv
+    sys.stderr.write("\n".join(missing) + "\n")
+    raise SystemExit("CUDA EP has unresolved libraries")
+PY
+find /opt/venv -depth -type d -name "__pycache__" -exec rm -rf {} +
+find /opt/venv -type f \( -name "*.pyi" -o -name "*.pyc" \) -delete
+chown -R stt:stt /opt/venv
+EOF
 
 # --- Model: independent of app.py; Hub blob cache is a mount, not an image layer ---
 RUN --mount=type=cache,target=/root/.cache/huggingface \
