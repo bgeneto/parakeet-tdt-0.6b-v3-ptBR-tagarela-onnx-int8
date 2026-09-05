@@ -3,7 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Local tag only — this name is not on Docker Hub. Never pull.
     image: parakeet-stt-ptbr:1.0.0
+    pull_policy: build
     container_name: parakeet-stt
     restart: unless-stopped
     ports:
