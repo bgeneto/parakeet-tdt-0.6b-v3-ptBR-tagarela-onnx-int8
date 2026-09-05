@@ -16,10 +16,11 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       CUDA_MODULE_LOADING: LAZY
       MODEL_DIR: /opt/models/parakeet
-      GPU_MEM_LIMIT_GB: "4"
-      MAX_CHUNK_S: "20"
+      GPU_MEM_LIMIT_GB: "6"
+      MAX_CHUNK_S: "30"
       CHUNK_OVERLAP_S: "1.0"
       CHUNKING: window
+      PREPROCESS_ON_GPU: "1"
       MAX_CONCURRENT: "1"
       SLEEP_IDLE_SECONDS: "60"
       LOAD_AT_STARTUP: "1"

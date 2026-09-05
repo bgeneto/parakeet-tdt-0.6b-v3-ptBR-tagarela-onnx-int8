@@ -32,15 +32,18 @@ QUANTIZATION = os.environ.get("QUANTIZATION", "int8")
 LANGUAGE = os.environ.get("LANGUAGE", "pt-BR")
 MODEL_ID = os.environ.get("MODEL_ID", "parakeet-tdt-0.6b-v3-ptBR")
 SR = 16000
-# Parakeet TDT needs long acoustic context (Whisper uses ~30s). Tiny VAD
-# fragments were the main quality killer on conversational pt-BR.
-MAX_CHUNK_S = float(os.environ.get("MAX_CHUNK_S", "20"))
+# Long-form TDT: 30s windows saturate the encoder better than 20s.
+# TDT decode is still O(T); fewer windows = less overlap/kernel-launch tax.
+MAX_CHUNK_S = float(os.environ.get("MAX_CHUNK_S", "30"))
 CHUNK_OVERLAP_S = float(os.environ.get("CHUNK_OVERLAP_S", "1.0"))
+CHUNK_CONTEXT_S = float(os.environ.get("CHUNK_CONTEXT_S", "0.5"))
+CHUNK_LOOKBACK_S = float(os.environ.get("CHUNK_LOOKBACK_S", "2.0"))
 MIN_CHUNK_S = float(os.environ.get("MIN_CHUNK_S", "0.5"))
 CHUNKING = os.environ.get("CHUNKING", "window").strip().lower()
+PREPROCESS_ON_GPU = os.environ.get("PREPROCESS_ON_GPU", "1").lower() not in {"0", "false", "no"}
 _SPACE_RE = re.compile(r"\A\s|\s\B|(\s)\b")
 GPU_ID = int(os.environ.get("GPU_ID", "0"))
-GPU_MEM_LIMIT_GB = float(os.environ.get("GPU_MEM_LIMIT_GB", "4"))
+GPU_MEM_LIMIT_GB = float(os.environ.get("GPU_MEM_LIMIT_GB", "6"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
 SLEEP_IDLE_SECONDS = float(os.environ.get("SLEEP_IDLE_SECONDS", "60"))
 LOAD_AT_STARTUP = os.environ.get("LOAD_AT_STARTUP", "1").lower() not in {"0", "false", "no"}
@@ -124,12 +127,12 @@ def _providers() -> list:
     mem = int(GPU_MEM_LIMIT_GB * 1024 * 1024 * 1024)
     cuda_opts = {
         "device_id": GPU_ID,
-        "arena_extend_strategy": "kSameAsRequested",
+        "arena_extend_strategy": os.environ.get("ORT_ARENA_EXTEND", "kNextPowerOfTwo"),
         "gpu_mem_limit": mem,
         # HEURISTIC: wake-from-idle must not pay EXHAUSTIVE conv search every time.
         "cudnn_conv_algo_search": os.environ.get("CUDNN_CONV_ALGO_SEARCH", "HEURISTIC"),
         "do_copy_in_default_stream": True,
-        "cudnn_conv_use_max_workspace": os.environ.get("CUDNN_CONV_MAX_WORKSPACE", "0"),
+        "cudnn_conv_use_max_workspace": os.environ.get("CUDNN_CONV_MAX_WORKSPACE", "1"),
         "cudnn_conv1d_pad_to_nc1d": "1",
     }
     avail = ort.get_available_providers()
@@ -199,23 +202,37 @@ class AsrEngine:
         )
         cpu_ep = ["CPUExecutionProvider"]
         quant = QUANTIZATION.strip() or None
+        pre_on_gpu = PREPROCESS_ON_GPU and self._using_cuda
+        pre_cfg = {
+            "providers": providers if pre_on_gpu else cpu_ep,
+            "use_numpy_preprocessors": not pre_on_gpu,
+            "use_conv_preprocessors": pre_on_gpu,
+            "max_concurrent_workers": 1,
+        }
         self.model = onnx_asr.load_model(
             MODEL_ARCH,
             MODEL_DIR,
             quantization=quant,
             sess_options=_session_options(),
             providers=providers,
-            preprocessor_config={
-                "providers": cpu_ep,
-                "use_numpy_preprocessors": True,
-                "max_concurrent_workers": 1,
-            },
+            preprocessor_config=pre_cfg,
             resampler_config={"providers": cpu_ep},
         ).with_timestamps()
-        _ = self.model.recognize(np.zeros(SR, dtype=np.float32), sample_rate=SR)
+        # Warm a couple of lengths so cuDNN/CUDA kernels exist before the first request.
+        for sec in (1.0, min(4.0, MAX_CHUNK_S)):
+            n = max(SR, int(SR * sec))
+            _ = self.model.recognize(np.zeros(n, dtype=np.float32), sample_rate=SR)
         used = cuda_mem_used_mb()
         extra = f" | VRAM ~{used:.0f} MiB" if used is not None else ""
-        LOG.info("modelo pronto em %.1fs | %s | %s%s", time.perf_counter() - t0, MODEL_DIR, quant, extra)
+        LOG.info(
+            "modelo pronto em %.1fs | chunk=%.0fs overlap=%.1fs pre=%s | %s%s",
+            time.perf_counter() - t0,
+            MAX_CHUNK_S,
+            CHUNK_OVERLAP_S,
+            "cuda-conv" if pre_on_gpu else "cpu-numpy",
+            quant,
+            extra,
+        )
 
     def _unload_unlocked(self) -> None:
         if self.model is None:
@@ -257,12 +274,8 @@ def iter_audio(
     max_s: float = MAX_CHUNK_S,
     overlap_s: float = CHUNK_OVERLAP_S,
     min_s: float = MIN_CHUNK_S,
-) -> Iterator[tuple[float, float, float, np.ndarray]]:
-    """ffmpeg → 16 kHz mono windows with overlap. Yields (start, end, drop_before, pcm).
-
-    drop_before is seconds to discard at the start of the *new* window so overlap
-    is used as encoder context but not transcribed twice.
-    """
+) -> Iterator[tuple[float, float, np.ndarray]]:
+    """ffmpeg → 16 kHz mono. Yields (start, end, pcm) in file time, pcm includes left context."""
     if CHUNKING == "vad":
         yield from _iter_vad(src, max_s, min_s)
         return
@@ -282,24 +295,49 @@ def _close_ffmpeg(proc: subprocess.Popen, emitted: bool) -> None:
         raise RuntimeError(f"ffmpeg falhou (rc={proc.returncode}): {msg}")
 
 
+def _frame_rms(pcm: np.ndarray, sr: int, win_s: float = 0.03) -> tuple[np.ndarray, int]:
+    win = max(1, int(sr * win_s))
+    n = pcm.size // win
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32), win
+    frames = pcm[: n * win].reshape(n, win)
+    return np.sqrt(np.mean(frames * frames, axis=1) + 1e-12), win
+
+
+def _silence_cut(pcm: np.ndarray, sr: int, search_from: int, search_to: int, max_rms: float = 0.012) -> int | None:
+    """Index of the quietest 30 ms frame in [search_from, search_to), or None if never quiet."""
+    search_from = max(0, search_from)
+    search_to = min(pcm.size, search_to)
+    if search_to - search_from < int(sr * 0.06):
+        return None
+    rms, win = _frame_rms(pcm[search_from:search_to], sr)
+    if rms.size == 0:
+        return None
+    k = int(np.argmin(rms))
+    if float(rms[k]) > max_rms:
+        return None
+    return search_from + k * win
+
+
 def _iter_windows(
     src: Path, max_s: float, overlap_s: float, min_s: float
-) -> Iterator[tuple[float, float, float, np.ndarray]]:
-    chunk_n = max(1, int(SR * max_s))
-    overlap_n = int(SR * max(0.0, min(overlap_s, max_s - min_s)))
-    hop_n = max(1, chunk_n - overlap_n)
+) -> Iterator[tuple[float, float, np.ndarray]]:
+    """Silence-aligned ~max_s windows. Hard cuts keep `overlap_s` of audio for midpoint stitch."""
+    max_n = max(1, int(SR * max_s))
+    overlap_n = max(int(SR * 0.2), int(SR * min(overlap_s, max_s - min_s)))
+    context_n = max(0, int(SR * min(CHUNK_CONTEXT_S, overlap_s)))
+    look_n = max(overlap_n, int(SR * CHUNK_LOOKBACK_S))
     min_n = int(SR * min_s)
-    drop_s = overlap_n / SR
+    read_n = max(1, int(SR * 0.25))
     proc = ffmpeg_pcm_proc(src)
     if proc.stdout is None:
         raise RuntimeError("ffmpeg stdout indisponível")
     carry = np.zeros(0, dtype=np.float32)
     file_samples = 0
-    first = True
     emitted = False
     try:
         while True:
-            raw = proc.stdout.read(hop_n * 2)
+            raw = proc.stdout.read(read_n * 2)
             if not raw:
                 break
             pcm = _pcm16le(raw)
@@ -307,16 +345,28 @@ def _iter_windows(
                 break
             carry = np.concatenate([carry, pcm]) if carry.size else pcm
             file_samples += pcm.size
-            while carry.size >= chunk_n:
-                window = carry[:chunk_n]
-                start = (file_samples - carry.size) / SR
-                yield start, start + window.size / SR, (0.0 if first else drop_s), window
+            while carry.size >= max_n:
+                origin = file_samples - carry.size
+                target = max_n
+                min_keep = max(min_n, int(0.55 * max_n))
+                search_from = min_keep
+                search_to = target
+                look_from = max(search_from, target - look_n)
+                cut = _silence_cut(carry, SR, look_from, search_to)
+                if cut is None:
+                    cut = target
+                    keep_from = max(0, cut - overlap_n)
+                else:
+                    keep_from = max(0, cut - context_n)
+                window = carry[:cut]
+                start = origin / SR
+                yield start, start + window.size / SR, window
                 emitted = True
-                first = False
-                carry = carry[hop_n:]
+                carry = carry[keep_from:]
         if carry.size >= min_n:
-            start = (file_samples - carry.size) / SR
-            yield start, start + carry.size / SR, (0.0 if first else drop_s), carry
+            origin = file_samples - carry.size
+            start = origin / SR
+            yield start, start + carry.size / SR, carry
             emitted = True
     finally:
         _close_ffmpeg(proc, emitted)
@@ -330,7 +380,7 @@ def _iter_vad(
     hangover_ms: int = 1500,
     pad_ms: int = 300,
     abs_thresh: float = 0.008,
-) -> Iterator[tuple[float, float, float, np.ndarray]]:
+) -> Iterator[tuple[float, float, np.ndarray]]:
     """Optional energy VAD. Default hangover is 1.5s so conversational pauses stay in-context."""
     proc = ffmpeg_pcm_proc(src)
     if proc.stdout is None:
@@ -354,7 +404,7 @@ def _iter_vad(
     def emit(end_samples: int, arr: np.ndarray):
         if arr.size < min_n:
             return None
-        return max(0.0, utt_start), end_samples / SR, 0.0, arr
+        return max(0.0, utt_start), end_samples / SR, arr
 
     try:
         while True:
@@ -461,8 +511,26 @@ def _unwrap_asr(result: Any) -> Any:
     return result
 
 
-def _result_fields(result: Any, drop_before: float) -> tuple[str, list[float], list[str], list[float]]:
-    """Take .text from TimestampedResult — never str(result), which leaked empty dataclasses."""
+def _snap_cut(timestamps: list[float], tokens: list[str], t: float, radius: float = 0.25) -> float:
+    """Prefer a word-boundary token near t so SentencePiece words are not split."""
+    best_t, best_d = t, radius + 1.0
+    found = False
+    for ts, tok in zip(timestamps, tokens):
+        d = abs(ts - t)
+        if d > radius:
+            continue
+        boundary = tok.startswith(" ") or tok.startswith("\u2581")
+        score = d if boundary else d + radius
+        if score < best_d:
+            best_t, best_d, found = ts, score, True
+    return best_t if found else t
+
+
+def _slice_hypothesis(
+    result: Any,
+    t_from: float,
+    t_until: float | None,
+) -> tuple[str, list[float], list[str], list[float]]:
     result = _unwrap_asr(result)
     if result is None:
         return "", [], [], []
@@ -471,20 +539,27 @@ def _result_fields(result: Any, drop_before: float) -> tuple[str, list[float], l
     tokens = list(getattr(result, "tokens", None) or [])
     timestamps = [float(t) for t in (getattr(result, "timestamps", None) or [])]
     logprobs = [float(x) for x in (getattr(result, "logprobs", None) or [])]
-    if drop_before > 0 and timestamps and tokens:
-        n = min(len(tokens), len(timestamps))
-        keep = [i for i in range(n) if timestamps[i] >= drop_before]
-        tokens = [tokens[i] for i in keep]
-        timestamps = [timestamps[i] for i in keep]
-        logprobs = [logprobs[i] for i in keep] if logprobs else []
-        text = _tokens_to_text(tokens)
-    else:
+    n = min(len(tokens), len(timestamps))
+    tokens, timestamps = tokens[:n], timestamps[:n]
+    logprobs = logprobs[:n] if logprobs else []
+    if not tokens:
         raw = getattr(result, "text", None)
-        text = raw.strip() if isinstance(raw, str) else _tokens_to_text(tokens)
-    return text, timestamps, tokens, logprobs
+        return (raw.strip() if isinstance(raw, str) else ""), [], [], []
+    lo = _snap_cut(timestamps, tokens, t_from) if t_from > 0 else t_from
+    hi = _snap_cut(timestamps, tokens, t_until) if t_until is not None else None
+    keep = [
+        i
+        for i, ts in enumerate(timestamps)
+        if ts >= lo and (hi is None or ts < hi)
+    ]
+    tokens = [tokens[i] for i in keep]
+    timestamps = [timestamps[i] for i in keep]
+    logprobs = [logprobs[i] for i in keep] if logprobs else []
+    return _tokens_to_text(tokens), timestamps, tokens, logprobs
 
 
 def transcribe_file(path: Path, want_words: bool = False) -> dict:
+    """Overlap is owned once: previous window keeps [0, mid), next keeps [mid, end)."""
     if engine is None:
         raise RuntimeError("engine indisponível")
     t0 = time.perf_counter()
@@ -492,16 +567,20 @@ def transcribe_file(path: Path, want_words: bool = False) -> dict:
     segments: list[dict] = []
     words_out: list[dict] = []
     last_end = 0.0
-    for start, end, drop_before, pcm in iter_audio(path):
-        text, ts, tokens, logprobs = _result_fields(engine.recognize_pcm(pcm), drop_before)
+    pending: tuple[float, float, Any, float] | None = None
+
+    def emit(start: float, end: float, raw: Any, t_from: float, t_until: float | None) -> None:
+        nonlocal last_end
+        text, ts, tokens, logprobs = _slice_hypothesis(raw, t_from, t_until)
         last_end = end
         if not text:
-            continue
+            return
         if ts:
             seg_start = start + ts[0]
             seg_end = start + ts[-1]
         else:
-            seg_start, seg_end = start + drop_before, end
+            seg_start = start + t_from
+            seg_end = end if t_until is None else start + t_until
         avg_lp = float(np.mean(logprobs)) if logprobs else 0.0
         parts.append(text)
         segments.append(
@@ -520,6 +599,26 @@ def transcribe_file(path: Path, want_words: bool = False) -> dict:
         )
         if want_words:
             words_out.extend(_token_words(tokens, ts, start))
+
+    for start, end, pcm in iter_audio(path):
+        raw = engine.recognize_pcm(pcm)
+        if pending is not None:
+            p_start, p_end, p_raw, p_from = pending
+            overlap = p_end - start
+            if overlap > 0.05:
+                p_until = (p_end - p_start) - overlap / 2.0
+                cur_from = overlap / 2.0
+            else:
+                p_until = None
+                cur_from = 0.0
+            emit(p_start, p_end, p_raw, p_from, p_until)
+            pending = (start, end, raw, cur_from)
+        else:
+            pending = (start, end, raw, 0.0)
+    if pending is not None:
+        p_start, p_end, p_raw, p_from = pending
+        emit(p_start, p_end, p_raw, p_from, None)
+
     elapsed = time.perf_counter() - t0
     duration = last_end
     rtf = (elapsed / duration) if duration > 0 else 0.0

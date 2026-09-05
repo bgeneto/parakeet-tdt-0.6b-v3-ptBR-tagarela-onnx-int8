@@ -208,12 +208,15 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | `QUANTIZATION` | `int8` | Pesos INT8 (`encoder-model.int8.onnx`). |
 | `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
 | `GPU_ID` | `0` | Índice do dispositivo CUDA utilizado pelo ORT. |
-| `GPU_MEM_LIMIT_GB` | `4` | Teto de VRAM do arena CUDA enquanto o modelo está carregado (GB). |
+| `GPU_MEM_LIMIT_GB` | `6` | Teto de VRAM do arena CUDA enquanto o modelo está carregado (GB). |
+| `MAX_CHUNK_S` | `30` | Janela do encoder (s). 30 s ocupa melhor a 3090 que 20 s; o decoder TDT continua O(T). |
+| `CHUNK_OVERLAP_S` | `1.0` | Sobreposição só para corte duro (silêncio não precisa de 2 s). |
+| `PREPROCESS_ON_GPU` | `1` | Mel/STFT conv no CUDA. `0` = NumPy no CPU. |
 | `SLEEP_IDLE_SECONDS` | `60` | Segundos sem request até unload da GPU. `0` desliga o sleep. |
 | `LOAD_AT_STARTUP` | `1` | Carrega o modelo no boot. `0` = lazy load na primeira request. |
 | `CUDA_DEVICE_RESET` | `1` | Após unload, chama `cudaDeviceReset` para devolver VRAM ao driver. |
-| `MAX_CHUNK_S` | `20` | Janela acústica em segundos (contexto longo, como o Whisper). |
-| `CHUNK_OVERLAP_S` | `1.0` | Sobreposição entre janelas para não perder palavras na junta. |
+| `CHUNK_CONTEXT_S` | `0.5` | Prefixo de contexto após corte em silêncio. |
+| `CHUNK_LOOKBACK_S` | `2.0` | Procura pausa nos últimos N segundos da janela para não cortar palavra. |
 | `CHUNKING` | `window` | `window` (padrão, qualidade) ou `vad` (só silêncio longo). |
 | `MIN_CHUNK_S` | `0.5` | Tamanho mínimo da última janela. |
 | `MAX_CONCURRENT` | `1` | Número máximo de inferências simultâneas na GPU. |
@@ -228,7 +231,7 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 
 ## Dicas de Desempenho e Ajustes
 
-- **Throughput com o modelo quente**: `GPU_MEM_LIMIT_GB=4`, `MAX_CHUNK_S=25`, `SLEEP_IDLE_SECONDS=0` (nunca descarrega).
+- **Throughput com o modelo quente**: `SLEEP_IDLE_SECONDS=0`, `MAX_CHUNK_S=30`, `PREPROCESS_ON_GPU=1`. `40` só se VRAM/qualidade aguentar.
 - **VRAM mínima quando ocioso**: `SLEEP_IDLE_SECONDS=60` (padrão). A 3090 fica livre para LLM/TTS até a próxima transcrição.
 - **Primeira request após o sleep**: recarrega INT8 + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`).
 - **TensorRT**: não use TRT neste INT8 dinâmico (MatMul-only, sem calibração). CUDA EP é o caminho suportado.

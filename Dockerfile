@@ -59,8 +59,8 @@ COPY --chown=stt:stt app.py /app/app.py
 
 ENV MODEL_DIR=/opt/models/parakeet \
     UPLOAD_DIR=/tmp/stt \
-    GPU_MEM_LIMIT_GB=4 \
-    MAX_CHUNK_S=25 \
+    GPU_MEM_LIMIT_GB=6 \
+    MAX_CHUNK_S=30 \
     MAX_CONCURRENT=1 \
     SLEEP_IDLE_SECONDS=60 \
     OMP_NUM_THREADS=4 \
