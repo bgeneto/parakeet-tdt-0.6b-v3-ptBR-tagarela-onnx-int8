@@ -84,6 +84,7 @@ EOF
 ARG USE_QUANTIZATION=true
 COPY --chown=stt:stt download_model.py /app/download_model.py
 RUN --mount=type=cache,target=/root/.cache/huggingface \
+    --mount=type=secret,id=hf_token,env=HF_TOKEN,required=false \
     USE_QUANTIZATION=${USE_QUANTIZATION} HF_HOME=/root/.cache/huggingface \
     python download_model.py --dest /opt/models/parakeet \
     && chown -R stt:stt /opt/models

@@ -96,6 +96,17 @@ def download_model(
     }
     if revision:
         kwargs["revision"] = revision
+    token = (
+        os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+    ).strip()
+    if token:
+        kwargs["token"] = token
+        print("Hugging Face Hub: authenticated (HF_TOKEN)")
+    else:
+        print(
+            "Hugging Face Hub: unauthenticated. Set HF_TOKEN to avoid rate limits "
+            "(https://huggingface.co/settings/tokens)."
+        )
 
     snapshot_download(**kwargs)
     print(f"Model successfully downloaded to: {dest}")

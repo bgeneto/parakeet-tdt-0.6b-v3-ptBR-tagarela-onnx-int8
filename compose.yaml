@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
       args:
         USE_QUANTIZATION: "${USE_QUANTIZATION:-true}"
+      secrets:
+        - hf_token
     # Local tag only — this name is not on Docker Hub. Never pull.
     image: parakeet-stt-ptbr:1.0.0
     pull_policy: build
@@ -85,3 +87,8 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+# Build-only Hub token. Interpolated from the shell or project `.env`.
+secrets:
+  hf_token:
+    environment: HF_TOKEN

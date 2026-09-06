@@ -1,17 +1,26 @@
-# Parakeet TDT 0.6B v3 pt-BR (ONNX INT8) — TAGARELA
+# Parakeet TDT 0.6B v3 pt-BR (ONNX) — TAGARELA
 
-Servidor de Speech-to-Text (STT) de alta performance e produção para **Português Brasileiro (pt-BR)** baseado no modelo **NVIDIA Parakeet TDT 0.6B v3** (fine-tune TAGARELA). Por padrão usa a quantização **ONNX INT8** ([calneymgp](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8)); `USE_QUANTIZATION=false` baixa o ONNX de precisão total ([alefiury](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx)).
+Servidor de Speech-to-Text (STT) de produção para **Português Brasileiro (pt-BR)** baseado no modelo **NVIDIA Parakeet TDT 0.6B v3** (fine-tune TAGARELA). Dois checkpoints ONNX estão disponíveis; **na GPU use FP32**.
+
+| `USE_QUANTIZATION` | Checkpoint | Para quê | Tamanho |
+| :--- | :--- | :--- | :--- |
+| **`false` (GPU)** | FP32 [alefiury/...-TAGARELA-onnx](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx) | Servidor com NVIDIA GPU. MatMul no CUDA EP (cuBLAS). | ~2.5 GB |
+| **`true` (CPU)** | INT8 [calneymgp/...-onnx-int8](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8) | CPU, ou quando o objetivo é só reduzir disco/VRAM. **Não é INT8 de Tensor Core.** | ~0.9 GB |
+
+O `.env.example` recomenda `false` (GPU). Sem `.env`, o Compose/Dockerfile ainda caem em `true` (artefato menor). Qualquer mudança exige **rebuild** (`docker compose up -d --build`); senão a imagem continua com o checkpoint antigo.
+
+Detalhes: [INT8 é para CPU; FP32 é para GPU](#int8-é-para-cpu-fp32-é-para-gpu).
 
 ---
 
 ## Destaques do Projeto
 
-- **Ultraleve e Rápido**: Executa com **ONNX Runtime (CUDA Execution Provider)** sem dependências pesadas de PyTorch ou NeMo em tempo de inferência.
-- **Pegada de VRAM Reduzida**: INT8 + `gpu_mem_limit` de 4 GB enquanto o modelo está carregado. Após `SLEEP_IDLE_SECONDS` sem requests, as sessões ORT são destruídas e a GPU sofre `cudaDeviceReset`, devolvendo a VRAM ao driver (mesmo padrão do `llama-server --sleep-idle-seconds`).
-- **Streaming VAD (Voice Activity Detection)**: Decodificação contínua via `ffmpeg` fatiada dinamicamente por energia acústica. Processa áudios de qualquer formato e de **duração ilimitada sem estourar RAM ou VRAM**.
-- **Compatível com OpenAI API**: Endpoint compatível com `/v1/audio/transcriptions`, permitindo integração direta com bibliotecas existentes e com o SDK oficial da OpenAI.
-- **Air-Gap / Self-Contained**: O modelo ONNX escolhido (`USE_QUANTIZATION`) é baixado e congelado dentro da imagem Docker na etapa de build, garantindo inicialização confiável e sem dependência externa em runtime.
-- **Imagem Docker ~4.3 GB**: parte de `nvidia/cuda:12.4.1-base` e copia só as libs que o ONNX Runtime CUDA EP realmente liga (`ldd`). Fora da imagem: **NPP, NCCL, cuSOLVER, cuSPARSE, nvJPEG e cuFile** (não usadas neste STT de GPU única). Permanecem cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN 9.
+- **ONNX Runtime (CUDA Execution Provider)**: inferência sem PyTorch ou NeMo em runtime. Na GPU o caminho rápido é o **FP32**.
+- **Idle VRAM**: após `SLEEP_IDLE_SECONDS` sem requests, as sessões ORT são destruídas e a GPU sofre `cudaDeviceReset`, devolvendo a VRAM ao driver (mesmo padrão do `llama-server --sleep-idle-seconds`).
+- **Streaming VAD (Voice Activity Detection)**: decodificação contínua via `ffmpeg` fatiada dinamicamente por energia acústica. Processa áudios de qualquer formato e de **duração ilimitada sem estourar RAM ou VRAM**.
+- **Compatível com OpenAI API**: endpoint `/v1/audio/transcriptions`, bibliotecas existentes e SDK oficial da OpenAI.
+- **Air-Gap / Self-Contained**: o modelo ONNX escolhido (`USE_QUANTIZATION`) é baixado e congelado na imagem Docker no build.
+- **Imagem Docker ~4.3 GB**: parte de `nvidia/cuda:12.4.1-base` e copia só as libs que o ONNX Runtime CUDA EP realmente liga (`ldd`). Fora da imagem: **NPP, NCCL, cuSOLVER, cuSPARSE, nvJPEG e cuFile**. Permanecem cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN 9.
 
 ---
 
@@ -22,8 +31,8 @@ flowchart LR
     A[Arquivo de Áudio\nqualquer formato] --> B[ffmpeg subprocess\n16 kHz mono PCM]
     B --> C[VAD em Streaming\nDetecção de Silêncio / Energia]
     C --> D[Buffer de Fatias\nmax 25s por chunk]
-    D --> E[onnx-asr / Mel Spectrogram\nCPU Preprocessing]
-    E --> F[Parakeet TDT 0.6B INT8\nONNX Runtime CUDA EP]
+    D --> E[onnx-asr / Mel Spectrogram]
+    E --> F[Parakeet TDT 0.6B\nFP32 CUDA EP ou INT8 CPU]
     F --> G[Resultado JSON / Text\nOpenAI Spec + Timestamps + RTF]
 ```
 
@@ -31,14 +40,53 @@ flowchart LR
 
 | Escolha | Motivo técnico |
 | :--- | :--- |
-| **ONNX INT8 + `onnxruntime-gpu` (CUDA EP)** | Menor uso de VRAM e maior throughput; elimina overhead de PyTorch e NeMo em produção. |
+| **FP32 + `onnxruntime-gpu` (CUDA EP)** | Na GPU, `MatMul` FP32 usa cuBLAS. É o caminho de throughput. INT8 dinâmico **não** acelera este servidor (ver seção abaixo). |
 | **CUDA slim (`*-base` + cópia seletiva)** | A imagem `cudnn-runtime` inteira traz NPP/NCCL/cuSOLVER/cuSPARSE (~1 GB+) inúteis para este servidor. O Dockerfile copia só cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN. Imagem final **~4.3 GB** (`docker images`). |
-| **Preprocessor no CPU (NumPy)** | Mel spectrogram fora da GPU; VRAM só para encoder/decoder TDT INT8. |
-| **`gpu_mem_limit` 4 GB** | Teto do arena CUDA enquanto o modelo está acordado; não reserva os 24 GB da 3090. |
-| **`SLEEP_IDLE_SECONDS` (default 60)** | Sem tráfego, unload + `cudaDeviceReset`. A próxima request recarrega o INT8 (warmup ~1–3 s). |
+| **Preprocessor** | `PREPROCESS_ON_GPU=1` (padrão): Mel/STFT no CUDA. `0` = NumPy no CPU. |
+| **`gpu_mem_limit`** | Teto do arena CUDA enquanto o modelo está acordado (padrão 6 GB; FP32 pode precisar de 8 GB). Não reserva os 24 GB da 3090. |
+| **`SLEEP_IDLE_SECONDS` (default 60)** | Sem tráfego, unload + `cudaDeviceReset`. A próxima request recarrega o modelo (warmup ~1–3 s). |
 | **`ffmpeg` → PCM 16 kHz mono pipe** | Suporta qualquer container/codec: MP3, MP4, M4A, AAC, OGG, OPUS, FLAC, WEBM, MKV, WAV, etc. |
-| **VAD em streaming** | Duração de áudio ilimitada; o uso de RAM é proporcional a 1 chunk (~25s) e não ao tamanho total do arquivo. |
-| **1 worker Uvicorn + Semaphore Lock** | A sessão ORT/CUDA não é segura para múltiplos processos bifurcados (fork-unsafe). Como a inferência ocorre a dezenas de vezes a velocidade de tempo-real, a fila em semáforo serializa requisições sem contenção de contexto CUDA. |
+| **VAD em streaming** | Duração de áudio ilimitada; o uso de RAM é proporcional a 1 chunk (~30 s) e não ao tamanho total do arquivo. |
+| **1 worker Uvicorn + Semaphore Lock** | A sessão ORT/CUDA não é segura para múltiplos processos bifurcados (fork-unsafe). A fila em semáforo serializa requisições sem contenção de contexto CUDA. |
+
+---
+
+## INT8 é para CPU; FP32 é para GPU
+
+`USE_QUANTIZATION` **não** significa “INT8 mais rápido na GPU”. Significa “qual arquivo ONNX entra na imagem”.
+
+### `USE_QUANTIZATION=false` — use isto na GPU
+
+Carrega o ONNX **FP32**. Os `MatMul` do FastConformer ficam no **CUDA Execution Provider** (cuBLAS). É o modo em que uma 3090 / 5060 realmente trabalha. Ocupa mais disco e VRAM (~2.5 GB de pesos; `GPU_MEM_LIMIT_GB=8` se houver OOM).
+
+No `.env`:
+
+```
+USE_QUANTIZATION=false
+GPU_MEM_LIMIT_GB=8
+```
+
+Depois reconstrua (o modelo é baixado no build):
+
+```bash
+docker compose up -d --build
+```
+
+### `USE_QUANTIZATION=true` — INT8 desenhado para CPU
+
+Carrega o INT8 **dinâmico** (`onnxruntime.quantization.quantize_dynamic`, só `MatMul`, `QInt8`). Esse export foi feito para **CPU** (menos RAM/disco em apps desktop). **Não** é quantização estática com calibração, nem INT8 de Tensor Core / TensorRT.
+
+O que o grafo faz: cada `MatMul` vira `DynamicQuantizeLinear` (ativações em **UINT8**) + `MatMulInteger`. O CUDA EP do ONNX Runtime **não executa bem esse `MatMulInteger` UINT8** — os nós caem no **CPUExecutionProvider**. Conv e LayerNorm podem continuar na GPU. Resultado: o encoder (e cada passo do decoder TDT) pinga **GPU → CPU → GPU** em quase todas as camadas.
+
+Consequências observadas neste servidor:
+
+- INT8 na GPU costuma ser **várias vezes mais lento** que FP32 (na ordem de **~4×** neste stack), não mais rápido.
+- Trocar de GPU (1050 Ti vs 3090 vs 5060) **quase não muda** o tempo com INT8: o trabalho pesado está no CPU + cópias, não nos SMs.
+- INT8 **é** adequado se você rodar sem CUDA, ou se o único objetivo for o arquivo de ~0.9 GB.
+
+INT8 de GPU que *seria* mais rápido exigiria outro export (QDQ estático + TensorRT, ou weight-only `MatMulNBits` com kernel CUDA). Este checkpoint não é isso. **Não use TensorRT** neste INT8 dinâmico.
+
+O decoder TDT do `onnx-asr` continua um loop greedy no host (`session.run` por frame do encoder) nos dois modos. Por isso o FP32 ainda pode não escalar com a classe da GPU como um Whisper em CTranslate2 — mas deixa de estar preso ao CPU no `MatMulInteger`.
 
 ---
 
@@ -75,8 +123,9 @@ parakeet-tdt-0.6b-v3-ptBR-tagarela-onnx-int8/
 ```bash
 cp .env.example .env
 # Defina API_KEY em .env antes de expor a porta publicamente.
-# USE_QUANTIZATION=true  → INT8 (~0.9 GB)
-# USE_QUANTIZATION=false → FP32 alefiury (~2.5 GB); exige rebuild
+# GPU (recomendado): USE_QUANTIZATION=false  → FP32 (~2.5 GB)
+# CPU / tamanho:     USE_QUANTIZATION=true   → INT8 dinâmico (~0.9 GB), lento na GPU
+# Qualquer mudança de USE_QUANTIZATION exige rebuild (o modelo entra na imagem).
 docker compose up -d --build
 ```
 
@@ -220,7 +269,7 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 | :--- | :--- | :--- |
 | `MODEL_DIR` | `/opt/models/parakeet` | Diretório onde os artefatos do modelo ONNX residem. |
 | `MODEL_ARCH` | `nemo-conformer-tdt` | Tipo ONNX-ASR deste checkpoint (`config.json`). |
-| `USE_QUANTIZATION` | `true` | `true` = INT8 (`calneymgp/...-onnx-int8`). `false` = FP32 (`alefiury/...-TAGARELA-onnx`). Rebuild após mudar: `docker compose up -d --build`. |
+| `USE_QUANTIZATION` | `true` | **`false` = FP32 para GPU** (`alefiury/...-TAGARELA-onnx`). **`true` = INT8 dinâmico para CPU** (`calneymgp/...-onnx-int8`): menor disco, **mais lento no CUDA EP**. Rebuild após mudar: `docker compose up -d --build`. |
 | `MODEL_ID` | *(derivado)* | Nome do modelo na API. Vazio = ID do repositório Hugging Face escolhido. |
 | `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
 | `GPU_ID` | `0` | Índice da GPU no host (`nvidia-smi`). O Compose faz o pin via `device_ids`; no contêiner o ORT sempre usa o dispositivo CUDA `0`. Um único ID — `0,1` não vira lista YAML. |
@@ -251,10 +300,11 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 
 ## Dicas de Desempenho e Ajustes
 
+- **GPU**: `USE_QUANTIZATION=false` (FP32) + rebuild. INT8 neste repo **não** acelera a GPU.
 - **Throughput com o modelo quente**: `SLEEP_IDLE_SECONDS=0`, `MAX_CHUNK_S=30`, `PREPROCESS_ON_GPU=1`. `40` só se VRAM/qualidade aguentar.
 - **VRAM mínima quando ocioso**: `SLEEP_IDLE_SECONDS=60` (padrão). A 3090 fica livre para LLM/TTS até a próxima transcrição.
-- **Primeira request após o sleep**: recarrega INT8 + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`).
-- **TensorRT**: não use TRT neste INT8 dinâmico (MatMul-only, sem calibração). CUDA EP é o caminho suportado.
+- **Primeira request após o sleep**: recarrega o modelo + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`). Não use essa request para benchmark.
+- **TensorRT**: não use TRT neste INT8 dinâmico (MatMul-only, sem calibração, `MatMulInteger` UINT8). CUDA EP + FP32 é o caminho suportado na GPU.
 - **Tamanho da imagem (~4.3 GB)**: não volte para `nvidia/cuda:*-cudnn-runtime` como estágio final — isso reintroduz NPP, NCCL, cuSOLVER e cuSPARSE sem ganho de transcrição.
 
 ---
@@ -279,17 +329,17 @@ Caso prefira rodar diretamente no host Linux com ambiente virtual Python:
 
 3. **Baixe o modelo**:
    ```bash
-   # INT8 (padrão, USE_QUANTIZATION=true)
-   python3 download_model.py --dest ./models/parakeet
-
-   # FP32 (alefiury)
+   # GPU (recomendado): FP32
    USE_QUANTIZATION=false python3 download_model.py --dest ./models/parakeet
+
+   # CPU / tamanho: INT8 dinâmico (lento no CUDA EP)
+   USE_QUANTIZATION=true python3 download_model.py --dest ./models/parakeet
    ```
 
 4. **Inicie o servidor**:
    ```bash
    export MODEL_DIR="./models/parakeet"
-   # USE_QUANTIZATION=false se o download foi FP32
+   export USE_QUANTIZATION=false   # deve coincidir com o download
    uvicorn app:app --host 0.0.0.0 --port 8080
    ```
 
