@@ -210,8 +210,10 @@ class AsrEngine:
         if not encoder.is_file():
             raise FileNotFoundError(
                 f"Missing {encoder} (USE_QUANTIZATION={str(USE_QUANTIZATION).lower()}). "
-                f"Expected {_MODEL.repo_id}. Rebuild with docker compose up -d --build "
-                "or run download_model.py with the same USE_QUANTIZATION."
+                f"Expected {_MODEL.repo_id}. Weights live in MODEL_DIR "
+                f"(Compose bind-mounts MODEL_HOST_DIR, default ./models/parakeet). "
+                "Restart the container to let entrypoint.sh download, or run "
+                "download_model.py with the same USE_QUANTIZATION."
             )
         quant = QUANTIZATION
         pre_on_gpu = PREPROCESS_ON_GPU and self._using_cuda

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DEST = "./models/parakeet"
+MARKER_NAME = ".parakeet-variant"
 
 _TRUE = {"1", "true", "yes", "on", "y"}
 _FALSE = {"0", "false", "no", "off", "n"}
@@ -70,15 +71,47 @@ def resolve_variant(use_quant: bool | str | None = None) -> ModelVariant:
     return VARIANTS["int8" if enabled else "fp32"]
 
 
+def _marker_value(repo_id: str, revision: str | None) -> str:
+    return f"{repo_id}@{revision or 'main'}"
+
+
+def is_model_ready(
+    local_dir: str | Path,
+    encoder_file: str,
+    repo_id: str,
+    revision: str | None,
+) -> bool:
+    """True when the encoder is on disk and (if present) the variant marker matches."""
+    dest = Path(local_dir).resolve()
+    encoder = dest / encoder_file
+    if not encoder.is_file() or encoder.stat().st_size == 0:
+        return False
+    marker = dest / MARKER_NAME
+    if not marker.is_file():
+        return True
+    return marker.read_text(encoding="utf-8").strip() == _marker_value(repo_id, revision)
+
+
 def download_model(
     repo_id: str,
     local_dir: str | Path,
     revision: str | None = None,
+    encoder_file: str | None = None,
+    force: bool = False,
 ) -> None:
     dest = Path(local_dir).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    if (
+        not force
+        and encoder_file
+        and is_model_ready(dest, encoder_file, repo_id, revision)
+    ):
+        print(f"Model already present at '{dest}' ({encoder_file}); skipping download.")
+        return
+
     rev = f"@{revision}" if revision else ""
     print(f"Downloading model repository '{repo_id}{rev}' to '{dest}'...")
-    dest.mkdir(parents=True, exist_ok=True)
 
     try:
         from huggingface_hub import snapshot_download
@@ -92,7 +125,7 @@ def download_model(
     kwargs: dict = {
         "repo_id": repo_id,
         "local_dir": str(dest),
-        "ignore_patterns": ["*.md", ".gitattributes"],
+        "ignore_patterns": ["*.md", ".gitattributes", ".hf", ".hf/**", MARKER_NAME],
     }
     if revision:
         kwargs["revision"] = revision
@@ -109,6 +142,7 @@ def download_model(
         )
 
     snapshot_download(**kwargs)
+    (dest / MARKER_NAME).write_text(_marker_value(repo_id, revision), encoding="utf-8")
     print(f"Model successfully downloaded to: {dest}")
 
 
@@ -143,6 +177,11 @@ def main() -> None:
         default=os.environ.get("MODEL_DIR", DEFAULT_DEST),
         help=f"Local destination directory (default: MODEL_DIR or {DEFAULT_DEST})",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if the encoder is already present.",
+    )
     args = parser.parse_args()
 
     try:
@@ -156,7 +195,13 @@ def main() -> None:
         f"USE_QUANTIZATION={variant.key == 'int8'} variant={variant.key} "
         f"encoder={variant.encoder_file}"
     )
-    download_model(repo_id, args.dest, revision=revision)
+    download_model(
+        repo_id,
+        args.dest,
+        revision=revision,
+        encoder_file=None if args.repo.strip() else variant.encoder_file,
+        force=args.force,
+    )
 
 
 if __name__ == "__main__":

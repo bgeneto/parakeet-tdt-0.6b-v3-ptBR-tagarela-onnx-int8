@@ -3,13 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        USE_QUANTIZATION: "${USE_QUANTIZATION:-true}"
-      secrets:
-        - hf_token
     # Local tag only — this name is not on Docker Hub. Never pull.
     image: parakeet-stt-ptbr:1.0.0
-    pull_policy: build
+    pull_policy: never
     container_name: parakeet-stt
     restart: unless-stopped
     ports:
@@ -25,7 +21,9 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
       CUDA_MODULE_LOADING: "${CUDA_MODULE_LOADING:-LAZY}"
       API_KEY: "${API_KEY:-}"
+      HF_TOKEN: "${HF_TOKEN:-}"
       MODEL_DIR: "${MODEL_DIR:-/opt/models/parakeet}"
+      HF_HOME: "${HF_HOME:-/opt/models/parakeet/.hf}"
       MODEL_ARCH: "${MODEL_ARCH:-nemo-conformer-tdt}"
       USE_QUANTIZATION: "${USE_QUANTIZATION:-true}"
       LANGUAGE: "${LANGUAGE:-pt-BR}"
@@ -64,6 +62,9 @@ services:
             - driver: nvidia
               device_ids: ["${GPU_ID:-0}"]
               capabilities: [gpu]
+    volumes:
+      # Host weights survive rebuilds/restarts. First start downloads if empty.
+      - ${MODEL_HOST_DIR:-./models/parakeet}:${MODEL_DIR:-/opt/models/parakeet}
     shm_size: "1gb"
     ulimits:
       memlock: -1
@@ -81,14 +82,9 @@ services:
       interval: 30s
       timeout: 8s
       retries: 3
-      start_period: 90s
+      start_period: 600s
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
-
-# Build-only Hub token. Interpolated from the shell or project `.env`.
-secrets:
-  hf_token:
-    environment: HF_TOKEN

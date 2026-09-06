@@ -1,4 +1,4 @@
-# Build context is requirements.txt + download_model.py + app.py (see Dockerfile COPY).
+# Build context is requirements.txt + download_model.py + app.py + entrypoint.sh.
 # Keep the upload small and avoid checksum noise from local artifacts.
 .git
 .gitignore

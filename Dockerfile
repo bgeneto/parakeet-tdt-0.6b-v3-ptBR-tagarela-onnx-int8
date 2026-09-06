@@ -20,7 +20,7 @@ RUN mkdir -p /opt/cuda-slim/lib64 /opt/cuda-slim/cudnn \
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
 # Build/runtime invariants only. Tunables (SLEEP_IDLE_SECONDS, GPU_MEM_LIMIT_…)
-# live at the bottom so editing them does not invalidate apt/pip/model layers.
+# live at the bottom so editing them does not invalidate apt/pip layers.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -79,21 +79,14 @@ find /opt/venv -type f \( -name "*.pyi" -o -name "*.pyc" \) -delete
 chown -R stt:stt /opt/venv
 EOF
 
-# --- Model: download_model.py pins repo/revision; Hub blob cache is a mount ---
-# ARG must be consumed in this RUN so changing USE_QUANTIZATION busts the cache.
-ARG USE_QUANTIZATION=true
-COPY --chown=stt:stt download_model.py /app/download_model.py
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    --mount=type=secret,id=hf_token,env=HF_TOKEN,required=false \
-    USE_QUANTIZATION=${USE_QUANTIZATION} HF_HOME=/root/.cache/huggingface \
-    python download_model.py --dest /opt/models/parakeet \
-    && chown -R stt:stt /opt/models
-
-# --- App code: this is the only layer that changes on typical edits ---
-COPY --chown=stt:stt app.py /app/app.py
+# Weights are not baked in. Compose bind-mounts the host models dir; entrypoint
+# downloads on first start if the encoder is missing.
+COPY --chown=stt:stt download_model.py app.py /app/
+COPY --chmod=755 entrypoint.sh /app/entrypoint.sh
 
 # Runtime tunables (override with compose/.env / docker run -e). Do not bake API_KEY here.
 ENV MODEL_DIR=/opt/models/parakeet \
+    HF_HOME=/opt/models/parakeet/.hf \
     MODEL_ARCH=nemo-conformer-tdt \
     QUANTIZATION=int8 \
     LANGUAGE=pt-BR \
@@ -127,12 +120,14 @@ ENV MODEL_DIR=/opt/models/parakeet \
     CORS_ORIGINS=* \
     API_KEY=""
 
-USER stt
+# Root only long enough for entrypoint to chown the bind mount; then setpriv → stt.
 EXPOSE 8080
 
 # Liveness only — /ready may report model_loaded=false after idle sleep.
-HEALTHCHECK --interval=30s --timeout=8s --start-period=90s --retries=3 \
+# start-period covers first-boot Hub download into the bind mount (~2.5 GB FP32).
+HEALTHCHECK --interval=30s --timeout=8s --start-period=600s --retries=3 \
     CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8080'), timeout=5)"
 
 STOPSIGNAL SIGINT
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["sh", "-c", "exec uvicorn app:app --host \"${HOST:-0.0.0.0}\" --port \"${PORT:-8080}\" --workers 1 --loop uvloop --http httptools --timeout-keep-alive 30 --access-log"]

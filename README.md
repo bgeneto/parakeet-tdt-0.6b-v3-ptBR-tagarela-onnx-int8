@@ -7,7 +7,7 @@ Servidor de Speech-to-Text (STT) de produção para **Português Brasileiro (pt-
 | **`false` (GPU)** | FP32 [alefiury/...-TAGARELA-onnx](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx) | Servidor com NVIDIA GPU. MatMul no CUDA EP (cuBLAS). | ~2.5 GB |
 | **`true` (CPU)** | INT8 [calneymgp/...-onnx-int8](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8) | CPU, ou quando o objetivo é só reduzir disco/VRAM. **Não é INT8 de Tensor Core.** | ~0.9 GB |
 
-O `.env.example` recomenda `false` (GPU). Sem `.env`, o Compose/Dockerfile ainda caem em `true` (artefato menor). Qualquer mudança exige **rebuild** (`docker compose up -d --build`); senão a imagem continua com o checkpoint antigo.
+O `.env.example` recomenda `false` (GPU). Sem `.env`, o Compose ainda cai em `true` (artefato menor). Mudar `USE_QUANTIZATION` **não** exige rebuild: o volume `./models/parakeet` recebe o checkpoint no primeiro start (ou quando o encoder da variante ainda não está lá).
 
 Detalhes: [INT8 é para CPU; FP32 é para GPU](#int8-é-para-cpu-fp32-é-para-gpu).
 
@@ -19,8 +19,8 @@ Detalhes: [INT8 é para CPU; FP32 é para GPU](#int8-é-para-cpu-fp32-é-para-gp
 - **Idle VRAM**: após `SLEEP_IDLE_SECONDS` sem requests, as sessões ORT são destruídas e a GPU sofre `cudaDeviceReset`, devolvendo a VRAM ao driver (mesmo padrão do `llama-server --sleep-idle-seconds`).
 - **Streaming VAD (Voice Activity Detection)**: decodificação contínua via `ffmpeg` fatiada dinamicamente por energia acústica. Processa áudios de qualquer formato e de **duração ilimitada sem estourar RAM ou VRAM**.
 - **Compatível com OpenAI API**: endpoint `/v1/audio/transcriptions`, bibliotecas existentes e SDK oficial da OpenAI.
-- **Air-Gap / Self-Contained**: o modelo ONNX escolhido (`USE_QUANTIZATION`) é baixado e congelado na imagem Docker no build.
-- **Imagem Docker ~4.3 GB**: parte de `nvidia/cuda:12.4.1-base` e copia só as libs que o ONNX Runtime CUDA EP realmente liga (`ldd`). Fora da imagem: **NPP, NCCL, cuSOLVER, cuSPARSE, nvJPEG e cuFile**. Permanecem cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN 9.
+- **Modelo no host**: Compose bind-monta `MODEL_HOST_DIR` (padrão `./models/parakeet`) em `MODEL_DIR` (`/opt/models/parakeet`). Rebuild e restart reutilizam os pesos. Air-gap: pré-popular essa pasta e subir sem rede.
+- **Imagem Docker sem pesos**: parte de `nvidia/cuda:12.4.1-base` e copia só as libs que o ONNX Runtime CUDA EP realmente liga (`ldd`). Fora da imagem: **NPP, NCCL, cuSOLVER, cuSPARSE, nvJPEG e cuFile**. Permanecem cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN 9.
 
 ---
 
@@ -41,7 +41,7 @@ flowchart LR
 | Escolha | Motivo técnico |
 | :--- | :--- |
 | **FP32 + `onnxruntime-gpu` (CUDA EP)** | Na GPU, `MatMul` FP32 usa cuBLAS. É o caminho de throughput. INT8 dinâmico **não** acelera este servidor (ver seção abaixo). |
-| **CUDA slim (`*-base` + cópia seletiva)** | A imagem `cudnn-runtime` inteira traz NPP/NCCL/cuSOLVER/cuSPARSE (~1 GB+) inúteis para este servidor. O Dockerfile copia só cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN. Imagem final **~4.3 GB** (`docker images`). |
+| **CUDA slim (`*-base` + cópia seletiva)** | A imagem `cudnn-runtime` inteira traz NPP/NCCL/cuSOLVER/cuSPARSE (~1 GB+) inúteis para este servidor. O Dockerfile copia só cuBLAS, cuFFT, cuRAND, NVRTC e cuDNN. Os pesos ONNX ficam no bind-mount do host, não na imagem. |
 | **Preprocessor** | `PREPROCESS_ON_GPU=1` (padrão): Mel/STFT no CUDA. `0` = NumPy no CPU. |
 | **`gpu_mem_limit`** | Teto do arena CUDA enquanto o modelo está acordado (padrão 6 GB; FP32 pode precisar de 8 GB). Não reserva os 24 GB da 3090. |
 | **`SLEEP_IDLE_SECONDS` (default 60)** | Sem tráfego, unload + `cudaDeviceReset`. A próxima request recarrega o modelo (warmup ~1–3 s). |
@@ -53,7 +53,7 @@ flowchart LR
 
 ## INT8 é para CPU; FP32 é para GPU
 
-`USE_QUANTIZATION` **não** significa “INT8 mais rápido na GPU”. Significa “qual arquivo ONNX entra na imagem”.
+`USE_QUANTIZATION` **não** significa “INT8 mais rápido na GPU”. Significa “qual checkpoint o entrypoint baixa para o volume”.
 
 ### `USE_QUANTIZATION=false` — use isto na GPU
 
@@ -66,10 +66,10 @@ USE_QUANTIZATION=false
 GPU_MEM_LIMIT_GB=8
 ```
 
-Depois reconstrua (o modelo é baixado no build):
+Depois reinicie (o entrypoint baixa o FP32 para `./models/parakeet` se o encoder ainda não estiver lá):
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 ### `USE_QUANTIZATION=true` — INT8 desenhado para CPU
@@ -94,14 +94,15 @@ O decoder TDT do `onnx-asr` continua um loop greedy no host (`session.run` por f
 
 ```
 parakeet-tdt-0.6b-v3-ptBR-tagarela-onnx-int8/
-├── Dockerfile             # Imagem ~4.3 GB: CUDA base + libs ORT; sem NPP/NCCL/cuSOLVER/cuSPARSE
-├── compose.yaml           # Orquestração Docker Compose com reservas de GPU e tmpfs
+├── Dockerfile             # CUDA slim + Python; pesos NÃO entram na imagem
+├── compose.yaml           # GPU, tmpfs, bind-mount ./models/parakeet
+├── entrypoint.sh          # chown do volume + download se o encoder faltar
 ├── requirements.txt       # Dependências Python (onnx-asr, onnxruntime-gpu, FastAPI)
 ├── app.py                 # Servidor FastAPI com VAD streaming e motor ASR
 ├── .dockerignore          # Filtro de contexto para build do Docker
 ├── .gitignore             # Arquivos e pastas ignorados pelo Git
 ├── .env.example           # Modelo de variáveis de ambiente configuráveis
-├── download_model.py      # Script utilitário para download local do modelo
+├── download_model.py      # Download Hugging Face (host ou first-boot do container)
 ├── client_example.py      # Cliente CLI de teste (Python padrão sem dependências)
 └── README.md              # Documentação completa do projeto
 ```
@@ -125,11 +126,11 @@ cp .env.example .env
 # Defina API_KEY em .env antes de expor a porta publicamente.
 # GPU (recomendado): USE_QUANTIZATION=false  → FP32 (~2.5 GB)
 # CPU / tamanho:     USE_QUANTIZATION=true   → INT8 dinâmico (~0.9 GB), lento na GPU
-# Qualquer mudança de USE_QUANTIZATION exige rebuild (o modelo entra na imagem).
+# Pesos em ./models/parakeet (bind-mount). Rebuild não baixa de novo.
 docker compose up -d --build
 ```
 
-O download do modelo ocorre durante o build da imagem Docker. A imagem resultante (`parakeet-stt-ptbr:1.0.0`) fica em torno de **4.3 GB** no `docker images`: o estágio final usa `nvidia/cuda:12.4.1-base-ubuntu22.04` e recebe só cuBLAS, cuBLASLt, cuFFT, cuRAND, NVRTC e cuDNN 9. Pacotes da imagem `cudnn-runtime` **não copiados** (o CUDA EP do ORT não liga esses `.so`):
+Na **primeira** subida o entrypoint baixa o checkpoint para `./models/parakeet` se o encoder não existir. Restarts e rebuilds reutilizam essa pasta. A imagem (`parakeet-stt-ptbr:1.0.0`) não inclui os pesos; o estágio final usa `nvidia/cuda:12.4.1-base-ubuntu22.04` e recebe só cuBLAS, cuBLASLt, cuFFT, cuRAND, NVRTC e cuDNN 9. Pacotes da imagem `cudnn-runtime` **não copiados** (o CUDA EP do ORT não liga esses `.so`):
 
 - **NPP** — primitivas de imagem/vídeo
 - **NCCL** — comunicação multi-GPU
@@ -267,9 +268,11 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 
 | Variável | Padrão | Descrição |
 | :--- | :--- | :--- |
-| `MODEL_DIR` | `/opt/models/parakeet` | Diretório onde os artefatos do modelo ONNX residem. |
+| `MODEL_DIR` | `/opt/models/parakeet` | Caminho **dentro do contêiner** dos artefatos ONNX. |
+| `MODEL_HOST_DIR` | `./models/parakeet` | Pasta no **host** bind-montada em `MODEL_DIR`. |
 | `MODEL_ARCH` | `nemo-conformer-tdt` | Tipo ONNX-ASR deste checkpoint (`config.json`). |
-| `USE_QUANTIZATION` | `true` | **`false` = FP32 para GPU** (`alefiury/...-TAGARELA-onnx`). **`true` = INT8 dinâmico para CPU** (`calneymgp/...-onnx-int8`): menor disco, **mais lento no CUDA EP**. Rebuild após mudar: `docker compose up -d --build`. |
+| `USE_QUANTIZATION` | `true` | **`false` = FP32 para GPU** (`alefiury/...-TAGARELA-onnx`). **`true` = INT8 dinâmico para CPU** (`calneymgp/...-onnx-int8`): menor disco, **mais lento no CUDA EP**. Após mudar: `docker compose up -d` (baixa se o encoder da variante não estiver no volume). |
+| `HF_TOKEN` | *(vazio)* | Token do Hub no **primeiro** download (ou se o encoder faltar). |
 | `MODEL_ID` | *(derivado)* | Nome do modelo na API. Vazio = ID do repositório Hugging Face escolhido. |
 | `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
 | `GPU_ID` | `0` | Índice da GPU no host (`nvidia-smi`). O Compose faz o pin via `device_ids`; no contêiner o ORT sempre usa o dispositivo CUDA `0`. Um único ID — `0,1` não vira lista YAML. |
@@ -300,12 +303,12 @@ As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente 
 
 ## Dicas de Desempenho e Ajustes
 
-- **GPU**: `USE_QUANTIZATION=false` (FP32) + rebuild. INT8 neste repo **não** acelera a GPU.
+- **GPU**: `USE_QUANTIZATION=false` (FP32) e `docker compose up -d`. INT8 neste repo **não** acelera a GPU.
 - **Throughput com o modelo quente**: `SLEEP_IDLE_SECONDS=0`, `MAX_CHUNK_S=30`, `PREPROCESS_ON_GPU=1`. `40` só se VRAM/qualidade aguentar.
 - **VRAM mínima quando ocioso**: `SLEEP_IDLE_SECONDS=60` (padrão). A 3090 fica livre para LLM/TTS até a próxima transcrição.
 - **Primeira request após o sleep**: recarrega o modelo + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`). Não use essa request para benchmark.
 - **TensorRT**: não use TRT neste INT8 dinâmico (MatMul-only, sem calibração, `MatMulInteger` UINT8). CUDA EP + FP32 é o caminho suportado na GPU.
-- **Tamanho da imagem (~4.3 GB)**: não volte para `nvidia/cuda:*-cudnn-runtime` como estágio final — isso reintroduz NPP, NCCL, cuSOLVER e cuSPARSE sem ganho de transcrição.
+- **Tamanho da imagem**: os pesos ficam no bind-mount, não na imagem. Não volte para `nvidia/cuda:*-cudnn-runtime` como estágio final — isso reintroduz NPP, NCCL, cuSOLVER e cuSPARSE sem ganho de transcrição.
 
 ---
 
