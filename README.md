@@ -1,13 +1,14 @@
-# Parakeet TDT 0.6B v3 pt-BR (ONNX) — TAGARELA
+# Parakeet TDT 0.6B v3 (ONNX)
 
-Servidor de Speech-to-Text (STT) de produção para **Português Brasileiro (pt-BR)** baseado no modelo **NVIDIA Parakeet TDT 0.6B v3** (fine-tune TAGARELA). Dois checkpoints ONNX estão disponíveis; **na GPU use FP32**.
+Servidor de Speech-to-Text (STT) de produção baseado no **NVIDIA Parakeet TDT 0.6B v3**. Três checkpoints ONNX; escolha com `MODEL_VARIANT`. **Na GPU use FP32** (`pt-BR` ou `multilanguage`).
 
-| `USE_QUANTIZATION` | Checkpoint | Para quê | Tamanho |
+| `MODEL_VARIANT` | Checkpoint | Para quê | Tamanho |
 | :--- | :--- | :--- | :--- |
-| **`false` (GPU)** | FP32 [alefiury/...-TAGARELA-onnx](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx) | Servidor com NVIDIA GPU. MatMul no CUDA EP (cuBLAS). | ~2.5 GB |
-| **`true` (CPU)** | INT8 [calneymgp/...-onnx-int8](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8) | CPU, ou quando o objetivo é só reduzir disco/VRAM. **Não é INT8 de Tensor Core.** | ~0.9 GB |
+| **`pt-BR`** (GPU) | FP32 [alefiury/...-TAGARELA-onnx](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx) | Português brasileiro (fine-tune TAGARELA). MatMul no CUDA EP (cuBLAS). | ~2.5 GB |
+| **`pt-BR-INT8`** | INT8 [calneymgp/...-onnx-int8](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8) | Mesmo TAGARELA, para CPU ou disco/VRAM menor. **Não é INT8 de Tensor Core.** | ~0.9 GB |
+| **`multilanguage`** (GPU) | FP32 [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) via ONNX [istupakov/...-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) | Base NVIDIA: **25 línguas europeias** (o idioma sai do áudio; TDT não tem language id). | ~2.5 GB |
 
-O `.env.example` recomenda `false` (GPU). Sem `.env`, o Compose ainda cai em `true` (artefato menor). Mudar `USE_QUANTIZATION` **não** exige rebuild: o volume `./models/parakeet` recebe o checkpoint no primeiro start (ou quando o encoder da variante ainda não está lá).
+O `.env.example` recomenda `pt-BR`. Sem `.env`, o padrão também é `pt-BR`. Mudar `MODEL_VARIANT` **não** exige rebuild: o volume `./models/parakeet` recebe o checkpoint no primeiro start (ou quando o encoder da variante ainda não está lá). `USE_QUANTIZATION=true/false` ainda é aceito como alias de `pt-BR-INT8` / `pt-BR`.
 
 Detalhes: [INT8 é para CPU; FP32 é para GPU](#int8-é-para-cpu-fp32-é-para-gpu).
 
@@ -53,26 +54,29 @@ flowchart LR
 
 ## INT8 é para CPU; FP32 é para GPU
 
-`USE_QUANTIZATION` **não** significa “INT8 mais rápido na GPU”. Significa “qual checkpoint o entrypoint baixa para o volume”.
+`MODEL_VARIANT` escolhe o checkpoint que o entrypoint baixa para o volume. **`pt-BR-INT8` não é “INT8 mais rápido na GPU”.**
 
-### `USE_QUANTIZATION=false` — use isto na GPU
+### `MODEL_VARIANT=pt-BR` ou `multilanguage` — use isto na GPU
 
 Carrega o ONNX **FP32**. Os `MatMul` do FastConformer ficam no **CUDA Execution Provider** (cuBLAS). É o modo em que uma 3090 / 5060 realmente trabalha. Ocupa mais disco e VRAM (~2.5 GB de pesos; `GPU_MEM_LIMIT_GB=8` se houver OOM).
+
+- `pt-BR` — fine-tune TAGARELA (melhor em português brasileiro; outras línguas não são o alvo).
+- `multilanguage` — base NVIDIA v3 (25 línguas europeias).
 
 No `.env`:
 
 ```
-USE_QUANTIZATION=false
+MODEL_VARIANT=pt-BR
 GPU_MEM_LIMIT_GB=8
 ```
 
-Depois reinicie (o entrypoint baixa o FP32 para `./models/parakeet` se o encoder ainda não estiver lá):
+Depois reinicie (o entrypoint baixa o FP32 para `./models/parakeet` se o encoder da variante ainda não estiver lá):
 
 ```bash
 docker compose up -d
 ```
 
-### `USE_QUANTIZATION=true` — INT8 desenhado para CPU
+### `MODEL_VARIANT=pt-BR-INT8` — INT8 desenhado para CPU
 
 Carrega o INT8 **dinâmico** (`onnxruntime.quantization.quantize_dynamic`, só `MatMul`, `QInt8`). Esse export foi feito para **CPU** (menos RAM/disco em apps desktop). **Não** é quantização estática com calibração, nem INT8 de Tensor Core / TensorRT.
 
@@ -124,8 +128,9 @@ parakeet-tdt-0.6b-v3-ptBR-tagarela-onnx-int8/
 ```bash
 cp .env.example .env
 # Defina API_KEY em .env antes de expor a porta publicamente.
-# GPU (recomendado): USE_QUANTIZATION=false  → FP32 (~2.5 GB)
-# CPU / tamanho:     USE_QUANTIZATION=true   → INT8 dinâmico (~0.9 GB), lento na GPU
+# GPU pt-BR (recomendado):  MODEL_VARIANT=pt-BR           → TAGARELA FP32 (~2.5 GB)
+# GPU 25 línguas:           MODEL_VARIANT=multilanguage   → NVIDIA v3 FP32 (~2.5 GB)
+# CPU / tamanho:            MODEL_VARIANT=pt-BR-INT8       → TAGARELA INT8 (~0.9 GB), lento na GPU
 # Pesos em ./models/parakeet (bind-mount). Rebuild não baixa de novo.
 docker compose up -d --build
 ```
@@ -149,7 +154,7 @@ curl -s http://localhost:8080/ready
 
 Resposta esperada:
 ```json
-{"status":"ready","model_loaded":true,"sleep_idle_seconds":60,"providers":["CUDAExecutionProvider","CPUExecutionProvider"],"vram_used_mb":2100.0}
+{"status":"ready","model_loaded":true,"model_variant":"pt-BR","sleep_idle_seconds":60,"providers":["CUDAExecutionProvider","CPUExecutionProvider"],"vram_used_mb":2100.0}
 ```
 
 ---
@@ -270,7 +275,7 @@ O `.env` (cópia de `.env.example`) só tem o que muda por máquina ou é segred
 | :--- | :--- | :--- |
 | `API_KEY` | *(vazio)* | Se definido, `/v1/audio/transcriptions` e `/transcribe` exigem `Authorization: Bearer …` ou `X-API-Key`. `/health` e `/ready` permanecem abertos. |
 | `HF_TOKEN` | *(vazio)* | Token do Hub no **primeiro** download (ou se o encoder faltar). |
-| `USE_QUANTIZATION` | `true` sem `.env` | **`false` = FP32 para GPU**. **`true` = INT8 dinâmico para CPU**. Após mudar: `docker compose up -d`. |
+| `MODEL_VARIANT` | `pt-BR` | **`pt-BR`** = TAGARELA FP32 (GPU). **`pt-BR-INT8`** = TAGARELA INT8 (CPU). **`multilanguage`** = NVIDIA v3 FP32 (25 línguas). Após mudar: `docker compose up -d`. |
 | `MODEL_HOST_DIR` | `./models/parakeet` | Pasta no **host** bind-montada em `/opt/models/parakeet`. |
 | `GPU_ID` | `0` | Índice da GPU no host (`nvidia-smi`). Um único ID. |
 | `GPU_MEM_LIMIT_GB` | `6` na imagem; `8` no `.env.example` | Teto de VRAM do arena CUDA (GB). FP32 costuma precisar de 8. |
@@ -281,7 +286,7 @@ O `.env` (cópia de `.env.example`) só tem o que muda por máquina ou é segred
 
 ## Dicas de Desempenho e Ajustes
 
-- **GPU**: `USE_QUANTIZATION=false` (FP32) e `docker compose up -d`. INT8 neste repo **não** acelera a GPU.
+- **GPU**: `MODEL_VARIANT=pt-BR` ou `multilanguage` (FP32) e `docker compose up -d`. `pt-BR-INT8` neste repo **não** acelera a GPU.
 - **Throughput com o modelo quente**: `SLEEP_IDLE_SECONDS=0`, `MAX_CHUNK_S=30`, `PREPROCESS_ON_GPU=1`. `40` só se VRAM/qualidade aguentar.
 - **VRAM mínima quando ocioso**: `SLEEP_IDLE_SECONDS=60` (padrão). A 3090 fica livre para LLM/TTS até a próxima transcrição.
 - **Primeira request após o sleep**: recarrega o modelo + warmup curto (cuDNN `HEURISTIC`, não `EXHAUSTIVE`). Não use essa request para benchmark.
@@ -310,17 +315,20 @@ Caso prefira rodar diretamente no host Linux com ambiente virtual Python:
 
 3. **Baixe o modelo**:
    ```bash
-   # GPU (recomendado): FP32
-   USE_QUANTIZATION=false python3 download_model.py --dest ./models/parakeet
+   # GPU pt-BR (recomendado): TAGARELA FP32
+   MODEL_VARIANT=pt-BR python3 download_model.py --dest ./models/parakeet
 
-   # CPU / tamanho: INT8 dinâmico (lento no CUDA EP)
-   USE_QUANTIZATION=true python3 download_model.py --dest ./models/parakeet
+   # GPU 25 línguas: NVIDIA Parakeet TDT 0.6B v3 (ONNX)
+   MODEL_VARIANT=multilanguage python3 download_model.py --dest ./models/parakeet
+
+   # CPU / tamanho: TAGARELA INT8 dinâmico (lento no CUDA EP)
+   MODEL_VARIANT=pt-BR-INT8 python3 download_model.py --dest ./models/parakeet
    ```
 
 4. **Inicie o servidor**:
    ```bash
    export MODEL_DIR="./models/parakeet"
-   export USE_QUANTIZATION=false   # deve coincidir com o download
+   export MODEL_VARIANT=pt-BR   # deve coincidir com o download
    uvicorn app:app --host 0.0.0.0 --port 8080
    ```
 
@@ -328,7 +336,8 @@ Caso prefira rodar diretamente no host Linux com ambiente virtual Python:
 
 ## Créditos e Reconhecimentos
 
-- Modelo desenvolvido e treinado pela [NVIDIA NeMo (Parakeet TDT 0.6B)](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+- Modelo desenvolvido e treinado pela [NVIDIA NeMo (Parakeet TDT 0.6B v3)](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+- Export ONNX da base multilingual: [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx).
 - Fine-tune pt-BR TAGARELA e export ONNX: [alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx](https://huggingface.co/alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx).
 - Quantização INT8: [TAGARELA / Calney G. P. Silva](https://huggingface.co/calneymgp/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx-int8).
 - Motor de inferência leve por [onnx-asr](https://github.com/thewh1teagle/onnx-asr) e [ONNX Runtime](https://onnxruntime.ai/).

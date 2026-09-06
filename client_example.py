@@ -101,7 +101,7 @@ def main() -> None:
         "--language",
         type=str,
         default=None,
-        help="Optional language hint echoed in verbose_json. Decoding is multilingual; this is not passed to the model.",
+        help="Optional language hint echoed in verbose_json. Not passed to the TDT decoder.",
     )
     parser.add_argument(
         "--api-key",

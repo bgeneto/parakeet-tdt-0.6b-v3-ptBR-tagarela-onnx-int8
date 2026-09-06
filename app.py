@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parakeet TDT 0.6B v3 pt-BR (ONNX INT8) — STT production server."""
+"""Parakeet TDT 0.6B v3 (ONNX) — STT production server."""
 from __future__ import annotations
 
 import asyncio
@@ -24,15 +24,18 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from download_model import resolve_variant, use_quantization_enabled
+from download_model import ENV_VAR as MODEL_VARIANT_ENV
+from download_model import resolve_variant
 
 LOG = logging.getLogger("stt")
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/opt/models/parakeet")
 # onnx-asr type for this checkpoint's config.json — not user-configurable.
 MODEL_ARCH = "nemo-conformer-tdt"
-USE_QUANTIZATION = use_quantization_enabled()
-_MODEL = resolve_variant(USE_QUANTIZATION)
+try:
+    _MODEL = resolve_variant()
+except ValueError as exc:
+    raise SystemExit(f"Error: {exc}") from exc
 QUANTIZATION = _MODEL.quantization
 MODEL_ID = os.environ.get("MODEL_ID", "").strip() or _MODEL.model_id
 SR = 16000
@@ -208,11 +211,11 @@ class AsrEngine:
         encoder = Path(MODEL_DIR) / _MODEL.encoder_file
         if not encoder.is_file():
             raise FileNotFoundError(
-                f"Missing {encoder} (USE_QUANTIZATION={str(USE_QUANTIZATION).lower()}). "
+                f"Missing {encoder} ({MODEL_VARIANT_ENV}={_MODEL.key}). "
                 f"Expected {_MODEL.repo_id}. Weights are under {MODEL_DIR} "
                 "(Compose bind-mounts ./models/parakeet by default). "
                 "Restart to let entrypoint.sh download, or run download_model.py "
-                "with the same USE_QUANTIZATION."
+                f"with the same {MODEL_VARIANT_ENV}."
             )
         quant = QUANTIZATION
         pre_on_gpu = PREPROCESS_ON_GPU and self._using_cuda
@@ -798,6 +801,7 @@ def ready():
     return {
         "status": "ready",
         "model_loaded": engine.loaded,
+        "model_variant": _MODEL.key,
         "sleep_idle_seconds": SLEEP_IDLE_SECONDS,
         "providers": ort.get_available_providers(),
         "vram_used_mb": None if used is None else round(used, 1),
@@ -868,8 +872,9 @@ async def transcribe(
     _: None = Depends(_check_api_key),
 ):
     del model, prompt, temperature  # accepted for OpenAI clients; unused
-    # `language` is metadata only — this TDT checkpoint is multilingual and
-    # does not take a language id for decoding.
+    # `language` is metadata only. TDT has no language-id input (unlike Whisper).
+    # pt-BR / pt-BR-INT8 decode as Portuguese; multilanguage auto-picks among
+    # the 25 European languages of NVIDIA Parakeet TDT 0.6B v3.
     lang = language.strip() if isinstance(language, str) and language.strip() else None
     if gpu_lock is None or engine is None:
         raise HTTPException(503, "servidor inicializando")
