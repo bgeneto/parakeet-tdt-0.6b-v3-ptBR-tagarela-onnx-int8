@@ -29,12 +29,11 @@ from download_model import resolve_variant, use_quantization_enabled
 LOG = logging.getLogger("stt")
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/opt/models/parakeet")
-# Generic TDT type matches this repo's config.json (not the NVIDIA Hub id).
-MODEL_ARCH = os.environ.get("MODEL_ARCH", "nemo-conformer-tdt")
+# onnx-asr type for this checkpoint's config.json — not user-configurable.
+MODEL_ARCH = "nemo-conformer-tdt"
 USE_QUANTIZATION = use_quantization_enabled()
 _MODEL = resolve_variant(USE_QUANTIZATION)
 QUANTIZATION = _MODEL.quantization
-LANGUAGE = os.environ.get("LANGUAGE", "pt-BR")
 MODEL_ID = os.environ.get("MODEL_ID", "").strip() or _MODEL.model_id
 SR = 16000
 # Long-form TDT: 30s windows saturate the encoder better than 20s.
@@ -210,10 +209,10 @@ class AsrEngine:
         if not encoder.is_file():
             raise FileNotFoundError(
                 f"Missing {encoder} (USE_QUANTIZATION={str(USE_QUANTIZATION).lower()}). "
-                f"Expected {_MODEL.repo_id}. Weights live in MODEL_DIR "
-                f"(Compose bind-mounts MODEL_HOST_DIR, default ./models/parakeet). "
-                "Restart the container to let entrypoint.sh download, or run "
-                "download_model.py with the same USE_QUANTIZATION."
+                f"Expected {_MODEL.repo_id}. Weights are under {MODEL_DIR} "
+                "(Compose bind-mounts ./models/parakeet by default). "
+                "Restart to let entrypoint.sh download, or run download_model.py "
+                "with the same USE_QUANTIZATION."
             )
         quant = QUANTIZATION
         pre_on_gpu = PREPROCESS_ON_GPU and self._using_cuda
@@ -572,7 +571,9 @@ def _slice_hypothesis(
     return _tokens_to_text(tokens), timestamps, tokens, logprobs
 
 
-def transcribe_file(path: Path, want_words: bool = False) -> dict:
+def transcribe_file(
+    path: Path, want_words: bool = False, language: str | None = None
+) -> dict:
     """Overlap is owned once: previous window keeps [0, mid), next keeps [mid, end)."""
     if engine is None:
         raise RuntimeError("engine indisponível")
@@ -639,7 +640,7 @@ def transcribe_file(path: Path, want_words: bool = False) -> dict:
     out = {
         "task": "transcribe",
         "text": " ".join(parts).strip(),
-        "language": LANGUAGE,
+        "language": language,
         "duration": round(duration, 3),
         "processing_time": round(elapsed, 3),
         "realtime_factor": round(rtf, 4),
@@ -866,7 +867,10 @@ async def transcribe(
     timestamp_granularities: str | None = Form(None),
     _: None = Depends(_check_api_key),
 ):
-    del model, language, prompt, temperature  # accepted for OpenAI clients; unused
+    del model, prompt, temperature  # accepted for OpenAI clients; unused
+    # `language` is metadata only — this TDT checkpoint is multilingual and
+    # does not take a language id for decoding.
+    lang = language.strip() if isinstance(language, str) and language.strip() else None
     if gpu_lock is None or engine is None:
         raise HTTPException(503, "servidor inicializando")
     fmt = (response_format or "json").lower()
@@ -877,7 +881,9 @@ async def transcribe(
     _touch_busy()
     try:
         async with gpu_lock:
-            result = await asyncio.to_thread(transcribe_file, dest, "word" in grains)
+            result = await asyncio.to_thread(
+                transcribe_file, dest, "word" in grains, lang
+            )
         if fmt == "text":
             return PlainTextResponse(result["text"])
         if fmt == "srt":

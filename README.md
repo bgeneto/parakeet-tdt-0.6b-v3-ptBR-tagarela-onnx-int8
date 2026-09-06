@@ -171,7 +171,7 @@ Exemplo de resposta:
 ```json
 {
   "text": "olá tudo bem este é um teste de transcrição em português com parakeet",
-  "language": "pt-BR",
+  "language": null,
   "duration": 4.52,
   "processing_time": 0.12,
   "realtime_factor": 0.0265,
@@ -264,40 +264,18 @@ print("Texto transcrito:", transcription.text)
 
 ## Variáveis de Ambiente
 
-As seguintes variáveis podem ser configuradas no arquivo `.env` ou diretamente no `compose.yaml`:
+O `.env` (cópia de `.env.example`) só tem o que muda por máquina ou é segredo. Internos (`MODEL_DIR`, `MODEL_ARCH`, chunking, threads, flags CUDA/ORT) ficam na imagem / `compose.yaml`.
 
 | Variável | Padrão | Descrição |
 | :--- | :--- | :--- |
-| `MODEL_DIR` | `/opt/models/parakeet` | Caminho **dentro do contêiner** dos artefatos ONNX. |
-| `MODEL_HOST_DIR` | `./models/parakeet` | Pasta no **host** bind-montada em `MODEL_DIR`. |
-| `MODEL_ARCH` | `nemo-conformer-tdt` | Tipo ONNX-ASR deste checkpoint (`config.json`). |
-| `USE_QUANTIZATION` | `true` | **`false` = FP32 para GPU** (`alefiury/...-TAGARELA-onnx`). **`true` = INT8 dinâmico para CPU** (`calneymgp/...-onnx-int8`): menor disco, **mais lento no CUDA EP**. Após mudar: `docker compose up -d` (baixa se o encoder da variante não estiver no volume). |
-| `HF_TOKEN` | *(vazio)* | Token do Hub no **primeiro** download (ou se o encoder faltar). |
-| `MODEL_ID` | *(derivado)* | Nome do modelo na API. Vazio = ID do repositório Hugging Face escolhido. |
-| `LANGUAGE` | `pt-BR` | Código de idioma retornado nos metadados. |
-| `GPU_ID` | `0` | Índice da GPU no host (`nvidia-smi`). O Compose faz o pin via `device_ids`; no contêiner o ORT sempre usa o dispositivo CUDA `0`. Um único ID — `0,1` não vira lista YAML. |
-| `GPU_MEM_LIMIT_GB` | `6` | Teto de VRAM do arena CUDA enquanto o modelo está carregado (GB). |
-| `MAX_CHUNK_S` | `30` | Janela do encoder (s). 30 s ocupa melhor a 3090 que 20 s; o decoder TDT continua O(T). |
-| `CHUNK_OVERLAP_S` | `1.0` | Sobreposição só para corte duro (silêncio não precisa de 2 s). |
-| `PREPROCESS_ON_GPU` | `1` | Mel/STFT conv no CUDA. `0` = NumPy no CPU. |
-| `SLEEP_IDLE_SECONDS` | `60` | Segundos sem request até unload da GPU. `0` desliga o sleep. |
-| `LOAD_AT_STARTUP` | `1` | Carrega o modelo no boot. `0` = lazy load na primeira request. |
-| `CUDA_DEVICE_RESET` | `1` | Após unload, chama `cudaDeviceReset` para devolver VRAM ao driver. |
-| `CHUNK_CONTEXT_S` | `0.5` | Prefixo de contexto após corte em silêncio. |
-| `CHUNK_LOOKBACK_S` | `2.0` | Procura pausa nos últimos N segundos da janela para não cortar palavra. |
-| `CHUNKING` | `window` | `window` (padrão, qualidade) ou `vad` (só silêncio longo). |
-| `MIN_CHUNK_S` | `0.5` | Tamanho mínimo da última janela. |
-| `MAX_CONCURRENT` | `1` | Número máximo de inferências simultâneas na GPU. |
-| `MAX_UPLOAD_MB` | `512` | Tamanho máximo do arquivo de upload. |
-| `ORT_INTRA_THREADS`| `4` | Número de threads para paralelismo intra-operação do ONNX Runtime. |
-| `ORT_INTER_THREADS`| `2` | Número de threads para paralelismo inter-operação do ONNX Runtime. |
-| `UPLOAD_DIR` | `/tmp/stt` | Diretório para escrita temporária dos arquivos recebidos (`tmpfs`). |
-| `LOG_LEVEL` | `INFO` | Nível de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
-| `HOST` | `0.0.0.0` | Bind do Uvicorn. |
-| `PORT` | `8080` | Porta HTTP (host e contêiner no Compose). |
-| `CORS_ENABLE` | `1` | Habilita CORS. `0` desliga. |
-| `CORS_ORIGINS` | `*` | Origens permitidas (lista separada por vírgula). |
 | `API_KEY` | *(vazio)* | Se definido, `/v1/audio/transcriptions` e `/transcribe` exigem `Authorization: Bearer …` ou `X-API-Key`. `/health` e `/ready` permanecem abertos. |
+| `HF_TOKEN` | *(vazio)* | Token do Hub no **primeiro** download (ou se o encoder faltar). |
+| `USE_QUANTIZATION` | `true` sem `.env` | **`false` = FP32 para GPU**. **`true` = INT8 dinâmico para CPU**. Após mudar: `docker compose up -d`. |
+| `MODEL_HOST_DIR` | `./models/parakeet` | Pasta no **host** bind-montada em `/opt/models/parakeet`. |
+| `GPU_ID` | `0` | Índice da GPU no host (`nvidia-smi`). Um único ID. |
+| `GPU_MEM_LIMIT_GB` | `6` na imagem; `8` no `.env.example` | Teto de VRAM do arena CUDA (GB). FP32 costuma precisar de 8. |
+| `SLEEP_IDLE_SECONDS` | `60` | Segundos sem request até unload da GPU. `0` desliga o sleep. |
+| `PORT` | `8080` | Porta HTTP (host e contêiner). |
 
 ---
 

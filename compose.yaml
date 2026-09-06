@@ -14,47 +14,20 @@ services:
       - path: .env
         required: false
     environment:
-      # Host GPU is selected only via deploy.device_ids (interpolated from .env
-      # GPU_ID). Inside the container that GPU is always CUDA device 0, so do
-      # not forward the host index as NVIDIA_VISIBLE_DEVICES / GPU_ID.
+      # Literals win over a leftover .env. User knobs come from env_file.
       NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
-      CUDA_MODULE_LOADING: "${CUDA_MODULE_LOADING:-LAZY}"
-      API_KEY: "${API_KEY:-}"
-      HF_TOKEN: "${HF_TOKEN:-}"
-      MODEL_DIR: "${MODEL_DIR:-/opt/models/parakeet}"
-      HF_HOME: "${HF_HOME:-/opt/models/parakeet/.hf}"
-      MODEL_ARCH: "${MODEL_ARCH:-nemo-conformer-tdt}"
-      USE_QUANTIZATION: "${USE_QUANTIZATION:-true}"
-      LANGUAGE: "${LANGUAGE:-pt-BR}"
-      MODEL_ID: "${MODEL_ID:-}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_MODULE_LOADING: LAZY
+      MODEL_DIR: /opt/models/parakeet
+      HF_HOME: /opt/models/parakeet/.hf
+      # Host GPU is selected only via deploy.device_ids. Inside the container
+      # that GPU is always CUDA device 0 — do not forward the host index.
       GPU_ID: "0"
-      GPU_MEM_LIMIT_GB: "${GPU_MEM_LIMIT_GB:-6}"
-      CUDNN_CONV_ALGO_SEARCH: "${CUDNN_CONV_ALGO_SEARCH:-HEURISTIC}"
-      CUDNN_CONV_MAX_WORKSPACE: "${CUDNN_CONV_MAX_WORKSPACE:-1}"
-      ORT_ARENA_EXTEND: "${ORT_ARENA_EXTEND:-kNextPowerOfTwo}"
-      PREPROCESS_ON_GPU: "${PREPROCESS_ON_GPU:-1}"
-      CHUNKING: "${CHUNKING:-window}"
-      MAX_CHUNK_S: "${MAX_CHUNK_S:-30}"
-      CHUNK_OVERLAP_S: "${CHUNK_OVERLAP_S:-1.0}"
-      CHUNK_CONTEXT_S: "${CHUNK_CONTEXT_S:-0.5}"
-      CHUNK_LOOKBACK_S: "${CHUNK_LOOKBACK_S:-2.0}"
-      MIN_CHUNK_S: "${MIN_CHUNK_S:-0.5}"
-      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-512}"
-      MAX_CONCURRENT: "${MAX_CONCURRENT:-1}"
-      ORT_INTRA_THREADS: "${ORT_INTRA_THREADS:-4}"
-      ORT_INTER_THREADS: "${ORT_INTER_THREADS:-2}"
-      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
-      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-4}"
-      SLEEP_IDLE_SECONDS: "${SLEEP_IDLE_SECONDS:-60}"
-      LOAD_AT_STARTUP: "${LOAD_AT_STARTUP:-1}"
-      CUDA_DEVICE_RESET: "${CUDA_DEVICE_RESET:-1}"
-      HOST: "${HOST:-0.0.0.0}"
-      PORT: "${PORT:-8080}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      UPLOAD_DIR: "${UPLOAD_DIR:-/tmp/stt}"
-      CORS_ENABLE: "${CORS_ENABLE:-1}"
-      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      CUDNN_CONV_ALGO_SEARCH: HEURISTIC
+      CUDNN_CONV_MAX_WORKSPACE: "1"
+      ORT_ARENA_EXTEND: kNextPowerOfTwo
+      HOST: "0.0.0.0"
+      UPLOAD_DIR: /tmp/stt
     deploy:
       resources:
         reservations:
@@ -63,8 +36,7 @@ services:
               device_ids: ["${GPU_ID:-0}"]
               capabilities: [gpu]
     volumes:
-      # Host weights survive rebuilds/restarts. First start downloads if empty.
-      - ${MODEL_HOST_DIR:-./models/parakeet}:${MODEL_DIR:-/opt/models/parakeet}
+      - ${MODEL_HOST_DIR:-./models/parakeet}:/opt/models/parakeet
     shm_size: "1gb"
     ulimits:
       memlock: -1

@@ -87,10 +87,6 @@ COPY --chmod=755 entrypoint.sh /app/entrypoint.sh
 # Runtime tunables (override with compose/.env / docker run -e). Do not bake API_KEY here.
 ENV MODEL_DIR=/opt/models/parakeet \
     HF_HOME=/opt/models/parakeet/.hf \
-    MODEL_ARCH=nemo-conformer-tdt \
-    QUANTIZATION=int8 \
-    LANGUAGE=pt-BR \
-    MODEL_ID=parakeet-tdt-0.6b-v3-ptBR \
     UPLOAD_DIR=/tmp/stt \
     GPU_ID=0 \
     GPU_MEM_LIMIT_GB=6 \
